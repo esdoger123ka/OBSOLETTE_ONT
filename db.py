@@ -137,6 +137,10 @@ async def transisi(no_inet: str, status_to: str, actor: int, *,
                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
                 no_inet, old, status_to, kode_kendala, catatan, sn_new, foto, actor, role,
             )
+            await con.execute(
+                """UPDATE klaster SET terakhir_aktif=now()
+                   WHERE group_uid=(SELECT group_uid FROM orders WHERE no_inet=$1)""",
+                no_inet)
             return old
 
 
@@ -159,6 +163,115 @@ async def set_assignment(group_uid: str, teknisi_id: int, by: int, catatan: str 
                    WHERE group_uid=$1 AND status='NEW'""",
                 group_uid,
             )
+
+
+# ---------------- klaim mandiri (pull terkunci) ----------------
+
+async def kolam_terdekat(lat: float, lon: float, radius_km: float, limit: int = 8):
+    """Klaster tanpa pemilik, diurutkan: prioritas dulu, lalu jarak yang
+    sudah didiskon menurut lama diam."""
+    diskon = float(await get_setting("diskon_umur_km_per_hari", "0.15"))
+    maxhari = int(await get_setting("max_diskon_hari", "20"))
+    return await pool().fetch(
+        """WITH j AS (
+             SELECT v.*,
+                    6371 * 2 * asin(sqrt(
+                      power(sin(radians(v.lat - $1) / 2), 2) +
+                      cos(radians($1)) * cos(radians(v.lat)) *
+                      power(sin(radians(v.lon - $2) / 2), 2)
+                    )) AS km
+             FROM v_kolam v
+           )
+           SELECT group_uid, zona, lat, lon, prioritas, sisa, diam_hari, km,
+                  km - ($5 * LEAST(diam_hari, $6)) AS skor
+           FROM j
+           WHERE km <= $3 OR prioritas
+           ORDER BY prioritas DESC, skor ASC
+           LIMIT $4""",
+        lat, lon, radius_km, limit, diskon, maxhari,
+    )
+
+
+async def klaim_aktif(teknisi_id: int) -> int:
+    n = await pool().fetchval(
+        "SELECT n_klaim FROM v_klaim_aktif WHERE teknisi_id=$1", teknisi_id)
+    return n or 0
+
+
+async def klaim(group_uid: str, teknisi_id: int, *, lat=None, lon=None,
+                jarak=None, live=None):
+    """Ambil klaster dari kolam. Gagal (False) kalau keburu diambil orang lain."""
+    hari = int(await get_setting("klaim_expire_hari", "5"))
+    async with pool().acquire() as con:
+        async with con.transaction():
+            ada = await con.fetchval(
+                "SELECT 1 FROM assignment WHERE group_uid=$1 AND aktif FOR UPDATE",
+                group_uid)
+            if ada:
+                return False
+            await con.execute(
+                """INSERT INTO assignment(group_uid,teknisi_id,assigned_by,
+                                          claim_mode,expires_at)
+                   VALUES($1,$2,$2,'self', now() + ($3||' days')::interval)""",
+                group_uid, teknisi_id, str(hari))
+            await con.execute(
+                """UPDATE orders SET status='ASSIGNED', assigned_at=now(), updated_at=now()
+                   WHERE group_uid=$1 AND status='NEW'""", group_uid)
+            await con.execute(
+                "UPDATE klaster SET terakhir_aktif=now() WHERE group_uid=$1", group_uid)
+            await con.execute(
+                """INSERT INTO klaim_log(group_uid,teknisi_id,aksi,lat,lon,jarak_km,live)
+                   VALUES($1,$2,'klaim',$3,$4,$5,$6)""",
+                group_uid, teknisi_id, lat, lon, jarak, live)
+            return True
+
+
+async def lepas(group_uid: str, teknisi_id: int, aksi: str = "lepas"):
+    async with pool().acquire() as con:
+        async with con.transaction():
+            await con.execute(
+                "UPDATE assignment SET aktif=FALSE, ended_at=now() WHERE group_uid=$1 AND aktif",
+                group_uid)
+            await con.execute(
+                """INSERT INTO klaim_log(group_uid,teknisi_id,aksi)
+                   VALUES($1,$2,$3)""", group_uid, teknisi_id, aksi)
+
+
+async def klaim_saya(teknisi_id: int):
+    return await pool().fetch(
+        """SELECT a.group_uid, a.expires_at, a.claim_mode,
+                  COUNT(o.no_inet) AS sisa
+           FROM assignment a
+           JOIN orders o ON o.group_uid=a.group_uid AND o.status NOT IN ('CLOSED','BATAL')
+           WHERE a.aktif AND a.teknisi_id=$1
+           GROUP BY a.group_uid, a.expires_at, a.claim_mode
+           ORDER BY a.expires_at NULLS LAST""",
+        teknisi_id)
+
+
+async def klaim_kedaluwarsa():
+    """Klaim mandiri yang lewat tenggat dan masih ada sisa order."""
+    return await pool().fetch(
+        """SELECT a.group_uid, a.teknisi_id, COUNT(o.no_inet) AS sisa
+           FROM assignment a
+           JOIN orders o ON o.group_uid=a.group_uid AND o.status NOT IN ('CLOSED','BATAL')
+           WHERE a.aktif AND a.claim_mode='self'
+             AND a.expires_at IS NOT NULL AND a.expires_at < now()
+           GROUP BY a.group_uid, a.teknisi_id""")
+
+
+async def set_prioritas(group_uid: str, nyala: bool) -> bool:
+    r = await pool().execute(
+        "UPDATE klaster SET prioritas=$2 WHERE group_uid=$1", group_uid, nyala)
+    return r.endswith("1")
+
+
+async def ringkas_kolam():
+    return await pool().fetchrow(
+        """SELECT COUNT(*) AS klaster, COALESCE(SUM(sisa),0) AS order_sisa,
+                  COUNT(*) FILTER (WHERE prioritas) AS didorong,
+                  COALESCE(MAX(diam_hari),0) AS terlama
+           FROM v_kolam""")
 
 
 async def klaster_zona(zona: str):
