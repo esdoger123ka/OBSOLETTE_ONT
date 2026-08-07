@@ -152,7 +152,8 @@ async def cmd_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_sisa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     if not t:
-        return
+        return await update.message.reply_text(
+            "Perintah ini untuk teknisi. Sebagai admin, pakai /beban.")
     r = await db.pool().fetchrow(
         "SELECT sisa, kendala, tunggu_tiket, closed FROM v_beban WHERE teknisi_id=$1",
         t["teknisi_id"])
@@ -162,13 +163,17 @@ async def cmd_sisa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_cari(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     t = await guard(update)
-    if not t or not ctx.args:
+    admin = await db.is_admin(uid)
+    if not t and not admin:
+        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+    if not ctx.args:
         return await update.message.reply_text("Format: /cari <no_inet>")
     o = await db.get_order(ctx.args[0].strip())
     if not o:
         return await update.message.reply_text("Order tidak ditemukan.")
-    if o["owner_id"] != t["teknisi_id"] and not await db.is_admin(t["teknisi_id"]):
+    if not admin and o["owner_id"] != t["teknisi_id"]:
         return await update.message.reply_text(
             f"Order ini milik {o['owner_nama'] or '-'}, bukan Anda.")
     await update.message.reply_text(kartu(o), parse_mode=ParseMode.HTML,
@@ -262,7 +267,8 @@ async def do_klaim(q, ctx, group_uid: str, uid: int):
 async def cmd_klaimsaya(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     if not t:
-        return
+        return await update.message.reply_text(
+            "Perintah ini untuk teknisi. Sebagai admin, pakai /kolam.")
     rows = await db.klaim_saya(t["teknisi_id"])
     if not rows:
         return await update.message.reply_text("Anda belum memegang klaster apa pun.")
