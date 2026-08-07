@@ -2,7 +2,10 @@ import logging
 import re
 from datetime import datetime, date, timedelta
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -102,6 +105,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_bantuan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/order — order yang harus dikerjakan hari ini\n"
+        "/ambil — kirim lokasi, lihat klaster bebas terdekat\n"
+        "/klaimsaya — klaster yang sedang Anda pegang\n"
         "/sisa — jumlah order tersisa\n"
         "/cari <no_inet> — buka satu order\n"
         "/batal — batalkan input yang sedang berjalan\n\n"
@@ -172,6 +177,108 @@ async def cmd_cari(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# klaim mandiri
+# ============================================================
+
+async def cmd_ambil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    t = await guard(update)
+    if not t:
+        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+    maks = int(await db.get_setting("max_klaim_aktif", "2"))
+    n = await db.klaim_aktif(t["teknisi_id"])
+    if n >= maks:
+        return await update.message.reply_text(
+            f"Anda sedang memegang {n} klaster hasil klaim (maksimal {maks}).\n"
+            "Selesaikan dulu, atau lepas salah satu lewat /klaimsaya.")
+    await update.message.reply_text(
+        "Kirim lokasi Anda sekarang. Tekan tombol di bawah — jangan pilih titik "
+        "manual di peta, karena lokasi manual akan ditandai di catatan.",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("Kirim lokasi saya", request_location=True)]],
+            resize_keyboard=True, one_time_keyboard=True))
+    ctx.user_data["pending"] = ("lokasi_klaim",)
+
+
+async def on_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    p = ctx.user_data.get("pending")
+    if not p or p[0] != "lokasi_klaim":
+        return
+    ctx.user_data.pop("pending")
+    loc = update.message.location
+    live = getattr(loc, "live_period", None) is not None
+    ctx.user_data["lokasi"] = (loc.latitude, loc.longitude, live)
+
+    radius = float(await db.get_setting("radius_klaim_km", "3"))
+    rows = await db.kolam_terdekat(loc.latitude, loc.longitude, radius)
+    if not rows:
+        return await update.message.reply_text(
+            f"Tidak ada klaster bebas dalam radius {radius:.0f} km dari lokasi Anda.\n"
+            "Coba lagi dari lokasi lain, atau kerjakan order yang sudah ada lewat /order.",
+            reply_markup=ReplyKeyboardRemove())
+
+    btn = []
+    for r in rows:
+        tanda = "★ " if r["prioritas"] else ""
+        umur = f" · diam {r['diam_hari']}h" if r["diam_hari"] >= 3 else ""
+        btn.append([InlineKeyboardButton(
+            f"{tanda}{r['group_uid']} · {r['km']:.1f} km · {r['sisa']} order{umur}",
+            callback_data=f"klaim|{r['group_uid']}")])
+    await update.message.reply_text(
+        "Klaster bebas terdekat. Mengambil satu klaster berarti mengambil "
+        "seluruh order di dalamnya.\n★ = didorong oleh Officer.",
+        reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("Pilih klaster:", reply_markup=kb(btn))
+
+
+async def do_klaim(q, ctx, group_uid: str, uid: int):
+    maks = int(await db.get_setting("max_klaim_aktif", "2"))
+    if await db.klaim_aktif(uid) >= maks:
+        return await q.message.reply_text(
+            f"Batas {maks} klaster aktif sudah tercapai.")
+    lat, lon, live = ctx.user_data.get("lokasi", (None, None, None))
+    jarak = None
+    if lat is not None:
+        k = await db.pool().fetchrow(
+            "SELECT lat, lon FROM klaster WHERE group_uid=$1", group_uid)
+        if k:
+            from math import radians, sin, cos, asin, sqrt
+            dlat = radians(k["lat"] - lat)
+            dlon = radians(k["lon"] - lon)
+            jarak = 6371 * 2 * asin(sqrt(
+                sin(dlat / 2) ** 2 +
+                cos(radians(lat)) * cos(radians(k["lat"])) * sin(dlon / 2) ** 2))
+    ok = await db.klaim(group_uid, uid, lat=lat, lon=lon, jarak=jarak, live=live)
+    if not ok:
+        return await q.message.reply_text(
+            f"Klaster {group_uid} baru saja diambil teknisi lain. Coba /ambil lagi.")
+    hari = int(await db.get_setting("klaim_expire_hari", "5"))
+    await q.message.reply_text(
+        f"Klaster {group_uid} sekarang milik Anda.\n"
+        f"Tenggat {hari} hari — kalau tidak ada progres sampai batas itu, "
+        "klaster otomatis kembali ke kolam.",
+        reply_markup=kb([[InlineKeyboardButton("Lihat order", callback_data="list|0")]]))
+
+
+async def cmd_klaimsaya(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    t = await guard(update)
+    if not t:
+        return
+    rows = await db.klaim_saya(t["teknisi_id"])
+    if not rows:
+        return await update.message.reply_text("Anda belum memegang klaster apa pun.")
+    out, btn = ["<b>Klaster yang Anda pegang</b>"], []
+    for r in rows:
+        asal = "klaim" if r["claim_mode"] == "self" else "penugasan"
+        tenggat = f" · tenggat {r['expires_at']:%d %b}" if r["expires_at"] else ""
+        out.append(f"{r['group_uid']} · sisa {r['sisa']} · {asal}{tenggat}")
+        if r["claim_mode"] == "self":
+            btn.append([InlineKeyboardButton(f"Lepas {r['group_uid']}",
+                                             callback_data=f"lepas|{r['group_uid']}")])
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML,
+                                    reply_markup=kb(btn) if btn else None)
+
+
+# ============================================================
 # aksi per order
 # ============================================================
 
@@ -183,6 +290,24 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if aksi == "list":
         return await kirim_daftar(q.message, uid, ctx)
+
+    if aksi == "klaim":
+        return await do_klaim(q, ctx, arg, uid)
+
+    if aksi == "lepas":
+        pemilik = await db.pool().fetchval(
+            "SELECT teknisi_id FROM assignment WHERE group_uid=$1 AND aktif", arg)
+        if pemilik != uid and not await db.is_admin(uid):
+            return await q.message.reply_text("Klaster ini bukan milik Anda.")
+        jalan = await db.pool().fetchval(
+            """SELECT COUNT(*) FROM orders WHERE group_uid=$1
+               AND status NOT IN ('NEW','ASSIGNED','CLOSED','BATAL')""", arg)
+        if jalan:
+            return await q.message.reply_text(
+                f"Tidak bisa dilepas: {jalan} order di klaster ini sudah jalan "
+                "(caring atau lebih). Selesaikan dulu, atau minta Officer melepasnya.")
+        await db.lepas(arg, uid)
+        return await q.message.reply_text(f"Klaster {arg} dikembalikan ke kolam.")
 
     if aksi == "open":
         o = await db.get_order(arg)
@@ -447,7 +572,12 @@ async def cmd_adminhelp(update: Update, ctx):
         "/tunggutiket — order yang mandek menunggu tiket\n"
         "/onboarding — siapa yang belum tekan /start\n"
         "/setkuota <n> — kuota order per teknisi per hari\n"
-        "/nonaktif <nama|nik> — nonaktifkan teknisi")
+        "/nonaktif <nama|nik> — nonaktifkan teknisi\n\n"
+        "<b>Kolam klaim</b>\n"
+        "/kolam — klaster tanpa pemilik\n"
+        "/dorong <group_uid> — paksa ke puncak daftar semua teknisi\n"
+        "/lepaspaksa <group_uid> — tarik klaster kembali ke kolam",
+        parse_mode=ParseMode.HTML)
 
 
 @admin_only
@@ -548,6 +678,46 @@ async def cmd_onboarding(update: Update, ctx):
 
 
 @admin_only
+async def cmd_kolam(update: Update, ctx):
+    r = await db.ringkas_kolam()
+    rows = await db.pool().fetch(
+        "SELECT group_uid, zona, sisa, diam_hari, prioritas FROM v_kolam "
+        "ORDER BY diam_hari DESC, sisa DESC LIMIT 20")
+    out = [f"<b>Kolam</b>: {r['klaster']} klaster · {r['order_sisa']} order · "
+           f"{r['didorong']} didorong · terlama diam {r['terlama']} hari", ""]
+    for k in rows:
+        out.append(f"{'★ ' if k['prioritas'] else ''}{k['group_uid']} · {k['zona']} · "
+                   f"sisa {k['sisa']} · diam {k['diam_hari']}h")
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_dorong(update: Update, ctx):
+    if not ctx.args:
+        return await update.message.reply_text(
+            "Format: /dorong <group_uid>  ·  batalkan: /dorong <group_uid> off")
+    gu = ctx.args[0]
+    nyala = not (len(ctx.args) > 1 and ctx.args[1].lower() in ("off", "0", "batal"))
+    if not await db.set_prioritas(gu, nyala):
+        return await update.message.reply_text("Klaster tidak ditemukan.")
+    await update.message.reply_text(
+        f"Klaster {gu} {'didorong ke puncak daftar semua teknisi' if nyala else 'tidak lagi didorong'}.")
+
+
+@admin_only
+async def cmd_lepaspaksa(update: Update, ctx):
+    if not ctx.args:
+        return await update.message.reply_text("Format: /lepaspaksa <group_uid>")
+    gu = ctx.args[0]
+    pemilik = await db.pool().fetchval(
+        "SELECT teknisi_id FROM assignment WHERE group_uid=$1 AND aktif", gu)
+    if not pemilik:
+        return await update.message.reply_text("Klaster ini sudah tidak ada pemiliknya.")
+    await db.lepas(gu, pemilik, aksi="dilepas_admin")
+    await update.message.reply_text(f"Klaster {gu} dikembalikan ke kolam.")
+
+
+@admin_only
 async def cmd_setkuota(update: Update, ctx):
     if not ctx.args or not ctx.args[0].isdigit():
         k = await db.get_setting("kuota_harian", "3")
@@ -601,6 +771,20 @@ async def job_distribusi(ctx: ContextTypes.DEFAULT_TYPE):
             log.warning("gagal kirim ke %s: %s", t["teknisi_id"], e)
 
 
+async def job_expire(ctx: ContextTypes.DEFAULT_TYPE):
+    """Lepas klaim mandiri yang lewat tenggat dan kembalikan ke kolam."""
+    for r in await db.klaim_kedaluwarsa():
+        await db.lepas(r["group_uid"], r["teknisi_id"], aksi="kedaluwarsa")
+        try:
+            await ctx.bot.send_message(
+                r["teknisi_id"],
+                f"Klaster {r['group_uid']} ({r['sisa']} order tersisa) sudah melewati "
+                "tenggat tanpa progres dan dikembalikan ke kolam. "
+                "Ambil lagi lewat /ambil kalau masih ingin mengerjakannya.")
+        except Exception as e:
+            log.warning("notifikasi kedaluwarsa gagal %s: %s", r["teknisi_id"], e)
+
+
 async def job_sla(ctx: ContextTypes.DEFAULT_TYPE):
     """Ingatkan order yang mandek menunggu tiket atau config."""
     sla_t = int(await db.get_setting("sla_tiket_jam", "8"))
@@ -646,6 +830,8 @@ def main():
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("sisa", cmd_sisa))
     app.add_handler(CommandHandler("cari", cmd_cari))
+    app.add_handler(CommandHandler("ambil", cmd_ambil))
+    app.add_handler(CommandHandler("klaimsaya", cmd_klaimsaya))
 
     app.add_handler(CommandHandler("adminhelp", cmd_adminhelp))
     app.add_handler(CommandHandler("beban", cmd_beban))
@@ -657,8 +843,12 @@ def main():
     app.add_handler(CommandHandler("onboarding", cmd_onboarding))
     app.add_handler(CommandHandler("setkuota", cmd_setkuota))
     app.add_handler(CommandHandler("nonaktif", cmd_nonaktif))
+    app.add_handler(CommandHandler("kolam", cmd_kolam))
+    app.add_handler(CommandHandler("dorong", cmd_dorong))
+    app.add_handler(CommandHandler("lepaspaksa", cmd_lepaspaksa))
 
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
@@ -667,6 +857,7 @@ def main():
     tz = zoneinfo.ZoneInfo(config.TZ)
     jq.run_daily(job_distribusi, time=datetime.strptime("07:30", "%H:%M").time().replace(tzinfo=tz))
     jq.run_repeating(job_sla, interval=timedelta(hours=2), first=timedelta(minutes=5))
+    jq.run_daily(job_expire, time=datetime.strptime("06:00", "%H:%M").time().replace(tzinfo=tz))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
