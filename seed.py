@@ -57,22 +57,37 @@ async def main(path: str):
     )
     print(f"orders: {len(orows)}")
 
-    # ---- assignment awal per klaster ----
-    zmap = {r.zona: int(r.user_id) for r in rekap.itertuples()}
-    pairs = (master[master.zona != "CEK-GEO"][["group_uid", "zona"]]
-             .drop_duplicates())
-    n = 0
-    for r in pairs.itertuples():
-        tid = zmap.get(r.zona)
-        if not tid:
-            continue
-        sudah = await db.pool().fetchval(
-            "SELECT 1 FROM assignment WHERE group_uid=$1 AND aktif", r.group_uid
-        )
-        if sudah:
-            continue
-        await db.set_assignment(r.group_uid, tid, by=None, catatan="seed awal")
-        n += 1
+    # ---- centroid klaster (untuk query jarak saat klaim) ----
+    cen = (master[master.zona != "CEK-GEO"]
+           .groupby(["group_uid", "zona"], as_index=False)
+           .agg(lat=("lat", "mean"), lon=("lon", "mean")))
+    await db.pool().executemany(
+        """INSERT INTO klaster(group_uid,zona,lat,lon) VALUES($1,$2,$3,$4)
+           ON CONFLICT (group_uid) DO UPDATE SET
+             zona=EXCLUDED.zona, lat=EXCLUDED.lat, lon=EXCLUDED.lon""",
+        [(r.group_uid, r.zona, float(r.lat), float(r.lon)) for r in cen.itertuples()],
+    )
+    print(f"klaster: {len(cen)}")
+
+    # ---- assignment awal ----
+    mode = await db.get_setting("mode_klaim", "hibrida")
+    if mode == "kolam":
+        print("mode_klaim=kolam — semua klaster dilepas ke kolam, tidak ada penugasan awal")
+        n = 0
+    else:
+        zmap = {r.zona: int(r.user_id) for r in rekap.itertuples()}
+        n = 0
+        for r in cen.itertuples():
+            tid = zmap.get(r.zona)
+            if not tid:
+                continue
+            sudah = await db.pool().fetchval(
+                "SELECT 1 FROM assignment WHERE group_uid=$1 AND aktif", r.group_uid
+            )
+            if sudah:
+                continue
+            await db.set_assignment(r.group_uid, tid, by=None, catatan="seed awal")
+            n += 1
     print(f"assignment baru: {n}")
 
     kg = await db.pool().fetchval("SELECT COUNT(*) FROM orders WHERE zona='CEK-GEO'")
