@@ -19,13 +19,16 @@ async def main(path: str):
     rekap = pd.read_excel(path, sheet_name="REKAP_TEKNISI")
 
     master["no_inet"] = master["no_inet"].astype(str).str.strip()
-    master["user_id"] = master["user_id"].astype(str).str.strip()
-    master["nik"] = master["nik"].astype(str).str.strip()
+    # Excel menyimpan user_id/nik sebagai float (98 baris CEK-GEO kosong ->
+    # NaN). astype(str) langsung akan menghasilkan '473776150.0' dan 'nan',
+    # jadi parse sebagai angka dulu.
+    master["user_id"] = pd.to_numeric(master["user_id"], errors="coerce").astype("Int64")
+    master["nik"] = pd.to_numeric(master["nik"], errors="coerce").astype("Int64")
 
     # ---- teknisi ----
-    tek = (master[master.user_id != "-"][["user_id", "nik", "teknisi"]]
+    tek = (master[master.user_id.notna()][["user_id", "nik", "teknisi"]]
            .drop_duplicates(subset=["user_id"]))
-    rows = [(int(r.user_id), r.nik, r.teknisi) for r in tek.itertuples()]
+    rows = [(int(r.user_id), str(r.nik), r.teknisi) for r in tek.itertuples()]
     await db.pool().executemany(
         """INSERT INTO teknisi(teknisi_id,nik,nama) VALUES($1,$2,$3)
            ON CONFLICT (teknisi_id) DO UPDATE SET nama=EXCLUDED.nama, nik=EXCLUDED.nik""",
@@ -34,7 +37,9 @@ async def main(path: str):
     print(f"teknisi: {len(rows)}")
 
     # ---- orders ----
-    o = master.where(pd.notna(master), None)
+    # astype(object) dulu: pada kolom bertipe str, NaN akan berubah jadi
+    # string 'nan' saat itertuples, bukan None.
+    o = master.astype(object).where(pd.notna(master), None)
     orows = [
         (r.no_inet, r.group_uid, r.zona,
          int(r.speed_mb) if r.speed_mb is not None else None,
