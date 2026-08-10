@@ -75,6 +75,30 @@ async def teks_request_config(no_inet: str) -> str:
             f"SN BARU : {r['sn_new'] or '-'}")
 
 
+async def teks_struk(no_inet: str) -> str:
+    """Struk penyelesaian, siap di-forward atau diarsipkan."""
+    r = await db.pool().fetchrow(
+        """SELECT o.no_inet, o.sn_old, o.sn_new, o.status, o.type_old,
+                  t.no_tiket, k.nama AS teknisi,
+                  to_char(o.closed_at AT TIME ZONE 'Asia/Jakarta',
+                          'DD/MM/YYYY HH24:MI') AS selesai
+           FROM orders o
+           LEFT JOIN tickets t ON t.no_inet = o.no_inet
+           LEFT JOIN teknisi k ON k.teknisi_id = o.closed_by
+           WHERE o.no_inet = $1""", no_inet)
+    if not r:
+        return None
+    return ("#selesai\n"
+            f"NO TIKET : {r['no_tiket'] or '-'}\n"
+            f"NO LAYANAN : {r['no_inet']}\n"
+            f"SN LAMA : {r['sn_old'] or '-'}\n"
+            f"SN BARU : {r['sn_new'] or '-'}\n"
+            f"ONT LAMA : {r['type_old'] or '-'}\n"
+            f"TEKNISI : {r['teknisi'] or '-'}\n"
+            f"SELESAI : {r['selesai'] or '-'}\n"
+            f"STATUS : {r['status']}")
+
+
 def aksi_untuk(status: str, no_inet: str):
     """Tombol yang relevan dengan status saat ini saja."""
     m = {
@@ -125,6 +149,7 @@ async def cmd_bantuan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/klaimsaya — klaster yang sedang Anda pegang\n"
         "/sisa — jumlah order tersisa\n"
         "/cari <no_inet> — buka satu order\n"
+        "/struk <no_inet> — cetak ulang struk order yang sudah selesai\n"
         "/batal — batalkan input yang sedang berjalan\n\n"
         "Alur: caring dulu → baru request tiket di grup TSEL → "
         "input nomor tiket di sini → ganti ONT + input SN baru → "
@@ -195,6 +220,26 @@ async def cmd_cari(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(kartu(o), parse_mode=ParseMode.HTML,
                                     reply_markup=aksi_untuk(o["status"], o["no_inet"]),
                                     disable_web_page_preview=True)
+
+
+async def cmd_struk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    t = await guard(update)
+    admin = await db.is_admin(uid)
+    if not t and not admin:
+        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+    if not ctx.args:
+        return await update.message.reply_text("Format: /struk <no_inet>")
+    no_inet = ctx.args[0].strip()
+    o = await db.get_order(no_inet)
+    if not o:
+        return await update.message.reply_text("Order tidak ditemukan.")
+    if not admin and o["owner_id"] != t["teknisi_id"] and o["closed_by"] != t["teknisi_id"]:
+        return await update.message.reply_text("Order ini bukan milik Anda.")
+    if o["status"] != "CLOSED":
+        return await update.message.reply_text(
+            f"Order ini belum selesai (status: {config.LABEL.get(o['status'], o['status'])}).")
+    await update.message.reply_text(await teks_struk(no_inet))
 
 
 # ============================================================
@@ -451,8 +496,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           extra_sql=", closed_at=now(), closed_by=$3", extra_args=(uid,))
         await db.pool().execute(
             "UPDATE tickets SET closed_at=now() WHERE no_inet=$1", arg)
+        await q.message.reply_text(await teks_struk(arg))
         return await q.message.reply_text(
-            f"Order {arg} selesai. Terima kasih.",
+            "Order selesai. Terima kasih.",
             reply_markup=kb([[InlineKeyboardButton("Order berikutnya",
                                                    callback_data="list|0")]]))
 
@@ -862,6 +908,7 @@ def main():
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("sisa", cmd_sisa))
     app.add_handler(CommandHandler("cari", cmd_cari))
+    app.add_handler(CommandHandler("struk", cmd_struk))
     app.add_handler(CommandHandler("ambil", cmd_ambil))
     app.add_handler(CommandHandler("klaimsaya", cmd_klaimsaya))
 
