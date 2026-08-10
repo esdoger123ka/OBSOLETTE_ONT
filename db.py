@@ -63,6 +63,44 @@ async def is_admin(uid: int) -> bool:
     return bool(await pool().fetchval("SELECT 1 FROM admin_user WHERE teknisi_id=$1", uid))
 
 
+async def tambah_teknisi(uid: int, nik: str, nama: str) -> str:
+    """'baru' | 'diperbarui' | 'nik_dipakai'"""
+    bentrok = await pool().fetchval(
+        "SELECT teknisi_id FROM teknisi WHERE nik=$1 AND teknisi_id<>$2", nik, uid)
+    if bentrok:
+        return "nik_dipakai"
+    ada = await pool().fetchval("SELECT 1 FROM teknisi WHERE teknisi_id=$1", uid)
+    await pool().execute(
+        """INSERT INTO teknisi(teknisi_id,nik,nama,aktif) VALUES($1,$2,$3,TRUE)
+           ON CONFLICT (teknisi_id) DO UPDATE
+           SET nik=EXCLUDED.nik, nama=EXCLUDED.nama, aktif=TRUE""",
+        uid, nik, nama)
+    return "diperbarui" if ada else "baru"
+
+
+async def aktifkan_teknisi(uid: int):
+    await pool().execute("UPDATE teknisi SET aktif=TRUE WHERE teknisi_id=$1", uid)
+
+
+async def tambah_admin(uid: int, nama: str) -> bool:
+    """False kalau sudah terdaftar sebagai admin."""
+    ada = await pool().fetchval("SELECT 1 FROM admin_user WHERE teknisi_id=$1", uid)
+    await pool().execute(
+        """INSERT INTO admin_user(teknisi_id,nama) VALUES($1,$2)
+           ON CONFLICT (teknisi_id) DO UPDATE SET nama=EXCLUDED.nama""", uid, nama)
+    return not ada
+
+
+async def hapus_admin(uid: int) -> bool:
+    r = await pool().execute("DELETE FROM admin_user WHERE teknisi_id=$1", uid)
+    return r.endswith("1")
+
+
+async def daftar_admin():
+    return await pool().fetch(
+        "SELECT teknisi_id, nama, created_at FROM admin_user ORDER BY nama")
+
+
 async def belum_onboarding():
     return await pool().fetch(
         "SELECT nik, nama, teknisi_id FROM teknisi WHERE aktif AND onboarded_at IS NULL ORDER BY nama"
