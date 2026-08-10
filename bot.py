@@ -10,6 +10,7 @@ from openpyxl import Workbook
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    BotCommand, BotCommandScopeDefault,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -45,23 +46,66 @@ async def guard(update: Update):
     return t
 
 
+# Enam langkah yang dilihat teknisi. Nomor langkah membuat orang tahu
+# posisinya, bukan sekadar nama status internal.
+LANGKAH = {
+    "ASSIGNED":   (1, "Telepon pelanggan dulu. Pastikan beliau ada di rumah dan "
+                      "bersedia ONT-nya diganti."),
+    "KENDALA":    (1, "Coba hubungi pelanggan lagi."),
+    "CARING_OK":  (2, "Kirim permintaan tiket di grup TSEL. Formatnya sudah "
+                      "disiapkan bot, tinggal lengkapi nama dan nomor HP pelanggan."),
+    "REQ_TIKET":  (3, "Tunggu admin grup menerbitkan tiket. Kalau nomornya sudah "
+                      "keluar, catat di sini."),
+    "TIKET_OPEN": (4, "Datangi lokasi, ganti ONT-nya, lalu catat SN perangkat baru "
+                      "beserta 2 foto."),
+    "GANTI_OK":   (5, "Kirim permintaan config ke helpdesk."),
+    "REQ_CONFIG": (5, "Tunggu helpdesk selesai config. Cek internet pelanggan sudah "
+                      "menyala."),
+    "CONFIG_OK":  (6, "Pastikan internet pelanggan normal, lalu tutup order ini."),
+}
+TOTAL_LANGKAH = 6
+
+
 def kartu(o) -> str:
-    maps = f"https://maps.google.com/?q={o['lat']},{o['lon']}" if o["lat"] else "-"
-    lines = [
-        f"<b>{o['no_inet']}</b>",
-        f"Status  : {config.LABEL.get(o['status'], o['status'])}",
-        f"Klaster : {o['group_uid']}  ·  Zona {o['zona']}",
-        f"Speed   : {o['speed_mb']} Mb",
-        f"ONT lama: {o['type_old'] or '-'} ({o['vendor_old'] or '-'})",
-        f"SN lama : <code>{o['sn_old'] or '-'}</code>",
-        f"Lokasi  : {maps}",
-    ]
-    if o["flag"] and o["flag"] != "OK":
-        lines.append(f"⚠ Flag  : {o['flag']}")
+    lines = [f"<b>No layanan {o['no_inet']}</b>"]
+
+    langkah = LANGKAH.get(o["status"])
+    if langkah:
+        no, apa = langkah
+        lines.append(f"Langkah {no} dari {TOTAL_LANGKAH}")
+        lines.append("")
+        lines.append(f"<b>Yang harus dilakukan sekarang</b>\n{apa}")
+    elif o["status"] == "CLOSED":
+        lines.append("Order ini sudah selesai.")
+
+    lines.append("")
+    lines.append("<b>Data pelanggan</b>")
+    lines.append(f"Kecepatan : {o['speed_mb']} Mbps")
+    lines.append(f"ONT lama  : {o['type_old'] or '-'}")
+    lines.append(f"SN lama   : <code>{o['sn_old'] or '-'}</code>")
+    if o["lat"]:
+        lines.append(f"Lokasi    : https://maps.google.com/?q={o['lat']},{o['lon']}")
+
     if o["status"] == "KENDALA":
-        lines.append(f"Kendala : {o['kode_kendala']} — {o['catatan_kendala'] or ''}")
+        lines.append("")
+        lines.append("<b>Kendala terakhir</b>")
+        lines.append(f"{o['kode_kendala']} — {o['catatan_kendala'] or '-'}")
         if o["followup_date"]:
-            lines.append(f"Follow-up: {o['followup_date']}")
+            lines.append(f"Dijadwalkan ulang: {o['followup_date']:%d %b %Y}")
+        if o["percobaan"]:
+            lines.append(f"Sudah dicoba {o['percobaan']} kali")
+
+    if o["flag"] == "SUDAH_DUALBAND":
+        lines.append("\n⚠ Menurut data, ONT di sini sudah Dual Band. "
+                     "Cek dulu di lokasi — kalau benar, pilih kendala K08.")
+    elif o["flag"] == "DATA_KOSONG":
+        lines.append("\n⚠ Data SN dan tipe ONT lama tidak ada di sistem. "
+                     "Catat manual saat di lokasi.")
+    elif o["flag"] == "CEK_GEO":
+        lines.append("\n⚠ Titik lokasi order ini meragukan. "
+                     "Konfirmasi alamat ke pelanggan sebelum berangkat.")
+    elif o["flag"] == "MULTI_ONT":
+        lines.append("\n⚠ Pelanggan ini punya lebih dari satu ONT.")
     return "\n".join(lines)
 
 
@@ -107,19 +151,24 @@ async def teks_struk(no_inet: str) -> str:
 def aksi_untuk(status: str, no_inet: str):
     """Tombol yang relevan dengan status saat ini saja."""
     m = {
-        "ASSIGNED": [("Caring OK", "caring"), ("Ada kendala", "kendala")],
-        "KENDALA": [("Coba lagi — caring OK", "caring"), ("Update kendala", "kendala")],
-        "CARING_OK": [("Sudah request tiket di grup", "reqtiket"), ("Ada kendala", "kendala")],
-        "REQ_TIKET": [("Input nomor tiket", "tiket"), ("Ada kendala", "kendala")],
-        "TIKET_OPEN": [("Input SN baru", "sn"), ("Ada kendala", "kendala")],
-        "GANTI_OK": [("Kirim ulang format request", "fmtconfig"),
-                     ("Sudah request config", "reqconfig")],
-        "REQ_CONFIG": [("Config OK", "configok")],
-        "CONFIG_OK": [("Close order", "close")],
+        "ASSIGNED":   [("✅ Pelanggan setuju, lanjut", "caring"),
+                       ("⚠️ Ada kendala", "kendala")],
+        "KENDALA":    [("✅ Sekarang bisa dilanjut", "caring"),
+                       ("⚠️ Ubah kendala", "kendala")],
+        "CARING_OK":  [("✅ Sudah saya kirim di grup TSEL", "reqtiket"),
+                       ("⚠️ Ada kendala", "kendala")],
+        "REQ_TIKET":  [("📝 Catat nomor tiket", "tiket"),
+                       ("⚠️ Ada kendala", "kendala")],
+        "TIKET_OPEN": [("📝 Catat SN ONT baru", "sn"),
+                       ("⚠️ Ada kendala", "kendala")],
+        "GANTI_OK":   [("✅ Sudah kirim ke helpdesk", "reqconfig"),
+                       ("🔄 Tampilkan lagi teks request", "fmtconfig")],
+        "REQ_CONFIG": [("✅ Internet sudah menyala", "configok")],
+        "CONFIG_OK":  [("🏁 Tutup order ini", "close")],
     }
     rows = [[InlineKeyboardButton(t, callback_data=f"{a}|{no_inet}")]
             for t, a in m.get(status, [])]
-    rows.append([InlineKeyboardButton("« Daftar order", callback_data="list|0")])
+    rows.append([InlineKeyboardButton("« Kembali ke daftar order", callback_data="list|0")])
     return kb(rows)
 
 
@@ -133,38 +182,56 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ok:
         t = await db.get_teknisi(u.id)
         await update.message.reply_text(
-            f"Terdaftar: {t['nama']} ({t['nik']}).\n\n"
-            "Ketik /order untuk melihat order hari ini.\n"
-            "/bantuan untuk daftar perintah."
-        )
+            f"Halo {t['nama'].title()}, Anda sudah terdaftar.\n\n"
+            "Bot ini menemani Anda mengerjakan penggantian ONT, dari menghubungi "
+            "pelanggan sampai order ditutup. Bot yang mengingatkan langkah "
+            "berikutnya, jadi Anda tidak perlu menghafal urutannya.\n\n"
+            "Ketik /order untuk mulai.\n"
+            "Ketik /bantuan kalau bingung.")
     elif await db.is_admin(u.id):
-        await update.message.reply_text("Mode admin aktif. /adminhelp untuk daftar perintah.")
+        await update.message.reply_text(
+            "Mode admin aktif. Ketik /adminhelp untuk daftar perintah.")
     else:
         await update.message.reply_text(
-            f"User ID Anda: <code>{u.id}</code>\n"
-            "ID ini belum terdaftar. Kirim ke Officer RJW untuk didaftarkan.",
-            parse_mode=ParseMode.HTML,
-        )
+            "Nomor Telegram Anda belum terdaftar di sistem ini.\n\n"
+            f"Kirim nomor berikut ke Officer RJW supaya didaftarkan:\n"
+            f"<code>{u.id}</code>\n\n"
+            "(tekan nomornya untuk menyalin)",
+            parse_mode=ParseMode.HTML)
 
 
 async def cmd_bantuan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/order — order yang harus dikerjakan hari ini\n"
-        "/ambil — kirim lokasi, lihat klaster bebas terdekat\n"
-        "/klaimsaya — klaster yang sedang Anda pegang\n"
-        "/sisa — jumlah order tersisa\n"
-        "/cari <no_inet> — buka satu order\n"
-        "/struk <no_inet> — cetak ulang struk order yang sudah selesai\n"
-        "/batal — batalkan input yang sedang berjalan\n\n"
-        "Alur: caring dulu → baru request tiket di grup TSEL → "
-        "input nomor tiket di sini → ganti ONT + input SN baru → "
-        "request config → close."
-    )
+        "<b>Urutan mengerjakan satu order</b>\n"
+        "1. Telepon pelanggan, pastikan setuju diganti\n"
+        "2. Minta tiket di grup TSEL (formatnya disiapkan bot)\n"
+        "3. Catat nomor tiket di bot\n"
+        "4. Ganti ONT, catat SN baru + 2 foto\n"
+        "5. Minta config ke helpdesk\n"
+        "6. Tutup order\n\n"
+        "Setiap selesai satu langkah, tekan tombolnya. Bot akan langsung "
+        "memberitahu langkah berikutnya.\n\n"
+        "<b>Perintah sehari-hari</b>\n"
+        "/order — lihat order yang harus dikerjakan hari ini\n"
+        "/sisa — berapa order Anda yang belum selesai\n"
+        "/cari 1234567890 — buka order tertentu dengan nomor layanannya\n\n"
+        "<b>Kalau order Anda habis</b>\n"
+        "/ambil — kirim lokasi, bot tunjukkan pekerjaan terdekat yang belum "
+        "ada yang pegang\n"
+        "/klaimsaya — daftar wilayah yang sedang Anda pegang\n\n"
+        "<b>Kalau salah ketik</b>\n"
+        "/batal — membatalkan pengisian yang sedang berjalan\n"
+        "/struk 1234567890 — cetak ulang bukti order yang sudah selesai\n\n"
+        "Kalau ada yang tidak jelas atau bot terasa aneh, hubungi Officer RJW.",
+        parse_mode=ParseMode.HTML)
 
 
 async def cmd_batal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data.pop("pending", None)
-    await update.message.reply_text("Input dibatalkan.")
+    ada = ctx.user_data.pop("pending", None)
+    await update.message.reply_text(
+        "Pengisian dibatalkan. Ketik /order untuk kembali ke daftar."
+        if ada else
+        "Tidak ada pengisian yang sedang berjalan. Ketik /order untuk mulai.")
 
 
 # ============================================================
@@ -174,24 +241,36 @@ async def cmd_batal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def kirim_daftar(target, uid: int, ctx):
     kuota = int(await db.get_setting("kuota_harian", "3"))
     rows = await db.antrian(uid, kuota)
-    if not rows:
-        return await target.reply_text("Tidak ada order aktif untuk Anda hari ini.")
-    btn = []
-    for r in rows:
-        tag = config.LABEL.get(r["status"], r["status"])
-        btn.append([InlineKeyboardButton(
-            f"{r['no_inet']} · {tag}", callback_data=f"open|{r['no_inet']}")])
     total = await db.pool().fetchval(
         """SELECT COUNT(*) FROM v_order_owner
            WHERE teknisi_id=$1 AND status NOT IN ('CLOSED','BATAL')""", uid)
+    if not rows:
+        if total:
+            return await target.reply_text(
+                f"Tidak ada yang bisa dikerjakan hari ini.\n\n"
+                f"Anda masih punya {total} order, tapi semuanya sedang menunggu — "
+                "entah menunggu tiket terbit, menunggu helpdesk, atau sudah "
+                "dijadwalkan ulang ke hari lain.\n\n"
+                "Kalau ingin menambah pekerjaan, ketik /ambil.")
+        return await target.reply_text(
+            "Semua order Anda sudah selesai. Kerja bagus.\n\n"
+            "Ketik /ambil untuk mengambil wilayah baru yang belum ada yang pegang.")
+    btn = []
+    for r in rows:
+        no = LANGKAH.get(r["status"], (0, ""))[0]
+        btn.append([InlineKeyboardButton(
+            f"{r['no_inet']} — langkah {no}/{TOTAL_LANGKAH}",
+            callback_data=f"open|{r['no_inet']}")])
     await target.reply_text(
-        f"Order hari ini ({len(rows)} dari {total} sisa):", reply_markup=kb(btn))
+        f"Ini {len(rows)} order untuk hari ini. Sisa keseluruhan {total} order.\n"
+        "Tekan salah satu untuk mulai.", reply_markup=kb(btn))
 
 
 async def cmd_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     if not t:
-        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+        return await update.message.reply_text("Nomor Telegram Anda belum terdaftar. Ketik /start untuk melihat "
+            "nomor yang perlu dikirim ke Officer RJW.")
     await kirim_daftar(update.message, t["teknisi_id"], ctx)
 
 
@@ -204,8 +283,10 @@ async def cmd_sisa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "SELECT sisa, kendala, tunggu_tiket, closed FROM v_beban WHERE teknisi_id=$1",
         t["teknisi_id"])
     await update.message.reply_text(
-        f"Sisa: {r['sisa']}\nSelesai: {r['closed']}\n"
-        f"Kendala: {r['kendala']}\nMenunggu tiket: {r['tunggu_tiket']}")
+        f"Belum selesai   : {r['sisa']} order\n"
+        f"Sudah selesai   : {r['closed']} order\n"
+        f"Sedang kendala  : {r['kendala']} order\n"
+        f"Menunggu tiket  : {r['tunggu_tiket']} order")
 
 
 async def cmd_cari(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -213,15 +294,18 @@ async def cmd_cari(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     admin = await db.is_admin(uid)
     if not t and not admin:
-        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+        return await update.message.reply_text("Nomor Telegram Anda belum terdaftar. Ketik /start untuk melihat "
+            "nomor yang perlu dikirim ke Officer RJW.")
     if not ctx.args:
         return await update.message.reply_text("Format: /cari <no_inet>")
     o = await db.get_order(ctx.args[0].strip())
     if not o:
-        return await update.message.reply_text("Order tidak ditemukan.")
+        return await update.message.reply_text("Nomor layanan itu tidak ada di daftar penggantian ONT. "
+            "Cek lagi angkanya.")
     if not admin and o["owner_id"] != t["teknisi_id"]:
         return await update.message.reply_text(
-            f"Order ini milik {o['owner_nama'] or '-'}, bukan Anda.")
+            f"Order ini dipegang oleh {o['owner_nama'] or 'teknisi lain'}, "
+            "bukan Anda.")
     await update.message.reply_text(kartu(o), parse_mode=ParseMode.HTML,
                                     reply_markup=aksi_untuk(o["status"], o["no_inet"]),
                                     disable_web_page_preview=True)
@@ -232,15 +316,17 @@ async def cmd_struk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     admin = await db.is_admin(uid)
     if not t and not admin:
-        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+        return await update.message.reply_text("Nomor Telegram Anda belum terdaftar. Ketik /start untuk melihat "
+            "nomor yang perlu dikirim ke Officer RJW.")
     if not ctx.args:
         return await update.message.reply_text("Format: /struk <no_inet>")
     no_inet = ctx.args[0].strip()
     o = await db.get_order(no_inet)
     if not o:
-        return await update.message.reply_text("Order tidak ditemukan.")
+        return await update.message.reply_text("Nomor layanan itu tidak ada di daftar penggantian ONT. "
+            "Cek lagi angkanya.")
     if not admin and o["owner_id"] != t["teknisi_id"] and o["closed_by"] != t["teknisi_id"]:
-        return await update.message.reply_text("Order ini bukan milik Anda.")
+        return await update.message.reply_text("Order ini dipegang teknisi lain, jadi tidak bisa Anda kerjakan.")
     if o["status"] != "CLOSED":
         return await update.message.reply_text(
             f"Order ini belum selesai (status: {config.LABEL.get(o['status'], o['status'])}).")
@@ -269,7 +355,8 @@ async def batas_klaim(uid: int):
 async def cmd_ambil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     if not t:
-        return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
+        return await update.message.reply_text("Nomor Telegram Anda belum terdaftar. Ketik /start untuk melihat "
+            "nomor yang perlu dikirim ke Officer RJW.")
     tolak = await batas_klaim(t["teknisi_id"])
     if tolak:
         return await update.message.reply_text(tolak)
@@ -381,7 +468,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pemilik = await db.pool().fetchval(
             "SELECT teknisi_id FROM assignment WHERE group_uid=$1 AND aktif", arg)
         if pemilik != uid and not await db.is_admin(uid):
-            return await q.message.reply_text("Klaster ini bukan milik Anda.")
+            return await q.message.reply_text("Wilayah ini bukan Anda yang pegang.")
         jalan = await db.pool().fetchval(
             """SELECT COUNT(*) FROM orders WHERE group_uid=$1
                AND status NOT IN ('NEW','ASSIGNED','CLOSED','BATAL')""", arg)
@@ -395,7 +482,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if aksi == "open":
         o = await db.get_order(arg)
         if not o:
-            return await q.message.reply_text("Order tidak ditemukan.")
+            return await q.message.reply_text("Nomor layanan itu tidak ada di daftar penggantian ONT. "
+            "Cek lagi angkanya.")
         return await q.message.reply_text(
             kartu(o), parse_mode=ParseMode.HTML,
             reply_markup=aksi_untuk(o["status"], o["no_inet"]),
@@ -408,9 +496,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     o = await db.get_order(arg)
     if not o:
-        return await q.message.reply_text("Order tidak ditemukan.")
+        return await q.message.reply_text("Nomor layanan itu tidak ada di daftar penggantian ONT. "
+            "Cek lagi angkanya.")
     if o["owner_id"] != uid and not await db.is_admin(uid):
-        return await q.message.reply_text("Order ini bukan milik Anda.")
+        return await q.message.reply_text("Order ini dipegang teknisi lain, jadi tidak bisa Anda kerjakan.")
 
     # ---- caring OK ----
     if aksi == "caring":
@@ -418,21 +507,23 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           extra_sql=", caring_at=now(), kode_kendala=NULL, catatan_kendala=NULL, followup_date=NULL")
         link = await db.get_setting("link_grup_tsel", "")
         teks = (
-            "Caring tercatat. Sekarang kirim request tiket di grup TSEL "
-            "dengan format berikut — lengkapi nama & CP dari sumber lain:\n\n"
+            "Bagus. <b>Langkah 2 dari 6</b>\n\n"
+            "Sekarang minta tiket di grup TSEL. Salin teks di bawah, lengkapi "
+            "<b>Nama Pelanggan</b> dan <b>CP Pelanggan</b> dari aplikasi yang biasa "
+            "Anda pakai, lalu kirim ke grup.\n\n"
             f"<code>No Internet : {o['no_inet']}\n"
             "Nama Pelanggan : \n"
             "CP Pelanggan : \n"
             "Witel : BANDUNG\n"
             "STO : RJW\n"
             "Request : Tiket Symptom Z_PERMINTAAN_044 untuk penggantian ONT</code>\n\n"
-            "Setelah terkirim, tekan tombol di bawah."
+            "Kalau sudah terkirim di grup, tekan tombol di bawah."
         )
         if link and link != "https://t.me/":
             teks += f"\n\nGrup: {link}"
         return await q.message.reply_text(
             teks, parse_mode=ParseMode.HTML,
-            reply_markup=kb([[InlineKeyboardButton("Sudah saya kirim di grup",
+            reply_markup=kb([[InlineKeyboardButton("✅ Sudah saya kirim di grup TSEL",
                                                    callback_data=f"reqtiket|{arg}")]]))
 
     # ---- tandai sudah request tiket ----
@@ -442,29 +533,39 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           extra_args=(uid,))
         sla = await db.get_setting("sla_tiket_jam", "8")
         return await q.message.reply_text(
-            f"Tercatat menunggu tiket. Begitu nomor tiket terbit di grup, "
-            f"tekan tombol di bawah dan kirim nomornya.\n"
-            f"Kalau lewat {sla} jam belum ada, sistem akan mengingatkan.",
-            reply_markup=kb([[InlineKeyboardButton("Input nomor tiket",
+            f"Tercatat. <b>Langkah 3 dari 6</b>\n\n"
+            "Sekarang tunggu admin grup menerbitkan tiketnya. Begitu nomor tiket "
+            "muncul di grup, kembali ke sini dan catat nomornya.\n\n"
+            f"Kalau lewat {sla} jam belum keluar juga, bot akan mengingatkan Anda. "
+            "Sambil menunggu, Anda bisa mengerjakan order lain lewat /order.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("📝 Catat nomor tiket",
                                                    callback_data=f"tiket|{arg}")]]))
 
     # ---- minta input teks ----
     if aksi == "tiket":
         ctx.user_data["pending"] = ("tiket", arg)
         return await q.message.reply_text(
-            "Kirim nomor tiketnya.\n"
-            "Format INSERA: INC12345678  ·  Format DSC: 1-A1B2C3D")
+            "Ketik nomor tiket yang diterbitkan admin grup.\n\n"
+            "Contoh yang benar:\n"
+            "INC51892061  (tiket INSERA)\n"
+            "1-S9Y14GE  (tiket DSC)\n\n"
+            "Salin persis seperti yang tertulis di grup. Batal? Ketik /batal.")
 
     if aksi == "sn":
         ctx.user_data["pending"] = ("sn", arg)
         return await q.message.reply_text(
-            f"Kirim SN ONT baru (16 karakter).\nSN lama: <code>{o['sn_old'] or '-'}</code>",
+            "Ketik SN ONT <b>yang baru dipasang</b>.\n\n"
+            "SN ada di stiker belakang atau bawah perangkat, 16 karakter, "
+            "biasanya diawali huruf. Jangan ketik SN yang lama.\n\n"
+            f"SN lama order ini: <code>{o['sn_old'] or 'tidak ada di data'}</code>\n\n"
+            "Batal? Ketik /batal.",
             parse_mode=ParseMode.HTML)
 
     if aksi == "kendala":
         rows = await db.pool().fetch("SELECT kode,label FROM kendala_ref ORDER BY urutan")
         return await q.message.reply_text(
-            "Pilih kendala:",
+            "Apa yang menghambat pekerjaan ini? Pilih yang paling sesuai:",
             reply_markup=kb([[InlineKeyboardButton(f"{r['kode']} {r['label']}",
                                                    callback_data=f"kd|{arg}|{r['kode']}")]
                              for r in rows]))
@@ -475,9 +576,16 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text("Kode kendala tidak dikenali.")
         if ref["perlu_catatan"] or ref["perlu_tanggal"]:
             ctx.user_data["pending"] = ("kendala", arg, kode_kendala, ref["perlu_tanggal"])
-            minta = ("tanggal follow-up (format YYYY-MM-DD)" if ref["perlu_tanggal"]
-                     else "keterangan singkat")
-            return await q.message.reply_text(f"{ref['label']}. Kirim {minta}.")
+            if ref["perlu_tanggal"]:
+                besok = (date.today() + timedelta(days=1)).isoformat()
+                minta = (f"Kapan pelanggan minta didatangi lagi?\n"
+                         f"Ketik tanggalnya dengan format tahun-bulan-tanggal, "
+                         f"contoh: {besok}")
+            else:
+                minta = ("Tulis keterangan singkat supaya Officer paham "
+                         "situasinya. Contoh: rumah dikunci, tetangga bilang "
+                         "pindah bulan lalu.")
+            return await q.message.reply_text(f"{ref['label']}.\n\n{minta}")
         return await simpan_kendala(q.message, arg, kode_kendala, uid, None, None)
 
     if aksi == "fmtconfig":
@@ -485,37 +593,49 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(teks)
         return await q.message.reply_text(
             "Teruskan pesan di atas ke helpdesk, lalu tekan tombol di bawah.",
-            reply_markup=kb([[InlineKeyboardButton("Sudah request config",
+            reply_markup=kb([[InlineKeyboardButton("✅ Sudah kirim ke helpdesk",
                                                    callback_data=f"reqconfig|{arg}")]]))
 
     if aksi == "reqconfig":
         await db.transisi(arg, "REQ_CONFIG", uid, extra_sql=", req_config_at=now()")
         return await q.message.reply_text(
-            "Tercatat menunggu config helpdesk.",
-            reply_markup=kb([[InlineKeyboardButton("Config sudah OK",
+            "Tercatat. Sekarang tunggu helpdesk menyelesaikan config.\n\n"
+            "Cek internet pelanggan — kalau sudah bisa browsing, tekan tombol di bawah.",
+            reply_markup=kb([[InlineKeyboardButton("✅ Internet sudah menyala",
                                                    callback_data=f"configok|{arg}")]]))
 
     if aksi == "configok":
         await db.transisi(arg, "CONFIG_OK", uid, extra_sql=", config_at=now()")
         return await q.message.reply_text(
-            "Config OK. Pastikan layanan sudah normal sebelum close.",
-            reply_markup=kb([[InlineKeyboardButton("Close order",
+            "Bagus. <b>Langkah 6 dari 6</b>\n\n"
+            "Sebelum menutup, pastikan sekali lagi internet pelanggan benar-benar "
+            "normal dan beliau tidak mengeluhkan apa pun.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("🏁 Tutup order ini",
                                                    callback_data=f"close|{arg}")]]))
 
     if aksi == "close":
         if not o["sn_new"]:
-            return await q.message.reply_text("Belum ada SN baru. Input SN dulu.")
-        if not (o["foto_label_sn"] and o["foto_terpasang"]):
             return await q.message.reply_text(
-                "Foto belum lengkap. Butuh foto label SN dan foto perangkat terpasang.")
+                "Order ini belum bisa ditutup karena SN ONT baru belum dicatat.",
+                reply_markup=kb([[InlineKeyboardButton("📝 Catat SN ONT baru",
+                                                       callback_data=f"sn|{arg}")]]))
+        if not (o["foto_label_sn"] and o["foto_terpasang"]):
+            kurang = ("foto stiker SN" if not o["foto_label_sn"]
+                      else "foto perangkat terpasang")
+            return await q.message.reply_text(
+                f"Order ini belum bisa ditutup karena {kurang} belum ada.\n\n"
+                "Kirim fotonya sekarang.")
         await db.transisi(arg, "CLOSED", uid,
                           extra_sql=", closed_at=now(), closed_by=$3", extra_args=(uid,))
         await db.pool().execute(
             "UPDATE tickets SET closed_at=now() WHERE no_inet=$1", arg)
         await q.message.reply_text(await teks_struk(arg))
         return await q.message.reply_text(
-            "Order selesai. Terima kasih.",
-            reply_markup=kb([[InlineKeyboardButton("Order berikutnya",
+            "Order selesai. Terima kasih.\n\n"
+            "Simpan bukti di atas — kalau nanti ada yang menanyakan, "
+            "bisa dipanggil lagi dengan /struk.",
+            reply_markup=kb([[InlineKeyboardButton("Lanjut order berikutnya",
                                                    callback_data="list|0")]]))
 
 
@@ -525,10 +645,14 @@ async def simpan_kendala(msg, no_inet, kode, uid, catatan, tgl):
         extra_sql=(", kode_kendala=$3, catatan_kendala=$4, followup_date=$5, "
                    "percobaan=percobaan+1"),
         extra_args=(kode, catatan, tgl))
-    lanjut = f" Follow-up {tgl}." if tgl else " Akan muncul lagi di antrian besok."
-    await msg.reply_text(f"Kendala {kode} tercatat.{lanjut}",
-                         reply_markup=kb([[InlineKeyboardButton("« Daftar order",
-                                                                callback_data="list|0")]]))
+    lanjut = (f"Order ini akan muncul lagi di daftar Anda pada {tgl:%d %b %Y}."
+              if tgl else
+              "Order ini akan muncul lagi di daftar Anda besok.")
+    await msg.reply_text(
+        f"Kendala tercatat. {lanjut}\n\n"
+        "Officer bisa melihat catatan ini, jadi Anda tidak perlu melapor terpisah.",
+        reply_markup=kb([[InlineKeyboardButton("« Kembali ke daftar order",
+                                               callback_data="list|0")]]))
 
 
 # ============================================================
@@ -553,13 +677,18 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             tipe = "DSC"
         else:
             return await update.message.reply_text(
-                "Format tidak dikenali. INSERA: INC + 8 angka. DSC: 1- diikuti 6-10 karakter.\n"
-                "Kirim ulang, atau /batal.")
+                f"Nomor \"{teks}\" belum sesuai format tiket.\n\n"
+                "Tiket INSERA: huruf INC diikuti 8 angka, contoh INC51892061\n"
+                "Tiket DSC: angka 1, tanda hubung, lalu 6-10 huruf/angka, "
+                "contoh 1-S9Y14GE\n\n"
+                "Coba salin ulang dari grup, atau ketik /batal.")
         dupe = await db.pool().fetchval(
             "SELECT no_inet FROM tickets WHERE no_tiket=$1 AND no_inet<>$2", val, no_inet)
         if dupe:
             return await update.message.reply_text(
-                f"Nomor tiket ini sudah dipakai order {dupe}. Cek kembali.")
+                f"Nomor tiket ini sudah tercatat untuk order lain ({dupe}).\n\n"
+                "Kemungkinan tersalin dari pekerjaan sebelumnya. Cek lagi nomor "
+                "tiket untuk order ini di grup.")
         o = await db.get_order(no_inet)
         await db.pool().execute(
             """INSERT INTO tickets(no_inet,no_tiket,jenis,requested_by,requested_at)
@@ -571,8 +700,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           extra_sql=", tiket_at=now()")
         ctx.user_data.pop("pending")
         return await update.message.reply_text(
-            f"Tiket {tipe} {val} tercatat. Silakan kerjakan penggantian ONT.",
-            reply_markup=kb([[InlineKeyboardButton("Input SN baru",
+            f"Tiket {tipe} {val} tercatat. <b>Langkah 4 dari 6</b>\n\n"
+            "Silakan datangi lokasi dan ganti ONT-nya. Setelah terpasang dan "
+            "internet menyala, kembali ke sini untuk mencatat SN perangkat baru "
+            "dan mengirim 2 foto.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("📝 Catat SN ONT baru",
                                                    callback_data=f"sn|{no_inet}")]]))
 
     # ---- SN baru ----
@@ -582,25 +715,41 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         o = await db.get_order(no_inet)
         if not HEX16.match(sn):
             return await update.message.reply_text(
-                "SN harus 16 karakter heksadesimal (0-9, A-F). Kirim ulang atau /batal.")
+                f"SN yang Anda ketik ada {len(sn)} karakter, seharusnya tepat 16 "
+                "dan hanya berisi angka 0-9 dan huruf A sampai F.\n\n"
+                "Cek lagi stiker di perangkat. Hati-hati membedakan angka 0 dengan "
+                "huruf O, dan angka 1 dengan huruf I.\n\n"
+                "Ketik ulang, atau /batal.")
         vendor = next((v for v, p8 in config.SN_PREFIX.items() if sn.startswith(p8)), None)
         if not vendor:
             return await update.message.reply_text(
-                "Prefix SN tidak dikenali. HUAWEI 48575443 · ZTE 5A544547 · "
-                "FIBERHOME 46485454.\nCek ulang label perangkat.")
+                "SN ini tidak dikenali sebagai perangkat HUAWEI, ZTE, maupun "
+                "FIBERHOME.\n\n"
+                "Biasanya karena ada karakter yang salah baca. Coba foto stikernya "
+                "lalu perbesar, dan ketik ulang.\n\n"
+                "Kalau perangkatnya memang merek lain, laporkan ke Officer RJW.")
         if o["sn_old"] and sn == o["sn_old"].upper():
             return await update.message.reply_text(
-                "SN ini sama dengan SN lama. Yang diminta SN perangkat pengganti.")
+                "SN ini sama persis dengan ONT yang lama.\n\n"
+                "Yang perlu dicatat adalah SN perangkat <b>baru</b> yang barusan "
+                "Anda pasang, bukan yang dicabut.",
+                parse_mode=ParseMode.HTML)
         dipakai = await db.sn_dipakai(sn, no_inet)
         if dipakai:
             return await update.message.reply_text(
-                f"SN ini sudah tercatat di order {dipakai}. Cek ulang perangkat.")
+                f"SN ini sudah tercatat terpasang di pelanggan lain ({dipakai}).\n\n"
+                "Satu perangkat tidak bisa terpasang di dua tempat. Kemungkinan "
+                "tersalin dari pekerjaan sebelumnya — cek ulang stiker perangkat "
+                "yang baru saja Anda pasang.")
         await db.transisi(no_inet, "GANTI_OK", uid, sn_new=sn,
                           extra_sql=", sn_new=$3, vendor_new=$4, ganti_at=now()",
                           extra_args=(sn, vendor))
         ctx.user_data["pending"] = ("foto_label", no_inet)
         return await update.message.reply_text(
-            f"SN {sn} ({vendor}) tercatat.\nKirim foto label SN perangkat baru.")
+            f"SN {sn} ({vendor}) tercatat.\n\n"
+            "Sekarang kirim <b>foto pertama</b>: stiker SN pada perangkat baru. "
+            "Pastikan tulisannya terbaca jelas.",
+            parse_mode=ParseMode.HTML)
 
     # ---- kendala dengan keterangan / tanggal ----
     if jenis == "kendala":
@@ -611,9 +760,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 tgl = datetime.strptime(teks, "%Y-%m-%d").date()
             except ValueError:
-                return await update.message.reply_text("Format tanggal: YYYY-MM-DD. Kirim ulang.")
+                besok = (date.today() + timedelta(days=1)).isoformat()
+                return await update.message.reply_text(
+                    f"Tanggalnya belum sesuai format. Tulis tahun-bulan-tanggal "
+                    f"dengan tanda hubung, contoh: {besok}")
             if tgl <= date.today():
-                return await update.message.reply_text("Tanggal harus setelah hari ini.")
+                return await update.message.reply_text(
+                    "Tanggalnya sudah lewat atau hari ini. Isi tanggal setelah "
+                    "hari ini, karena order ini akan dimunculkan lagi pada tanggal itu.")
             catatan = None
         ctx.user_data.pop("pending")
         return await simpan_kendala(update.message, no_inet, kode, uid, catatan, tgl)
@@ -630,7 +784,11 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "UPDATE orders SET foto_label_sn=$2, updated_at=now() WHERE no_inet=$1",
             no_inet, fid)
         ctx.user_data["pending"] = ("foto_terpasang", no_inet)
-        return await update.message.reply_text("Foto label tersimpan. Kirim foto perangkat terpasang.")
+        return await update.message.reply_text(
+            "Foto pertama tersimpan.\n\n"
+            "Sekarang <b>foto kedua</b>: perangkat baru yang sudah terpasang di "
+            "lokasi pelanggan, lampunya menyala.",
+            parse_mode=ParseMode.HTML)
     await db.pool().execute(
         "UPDATE orders SET foto_terpasang=$2, updated_at=now() WHERE no_inet=$1",
         no_inet, fid)
@@ -638,8 +796,11 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     teks = await teks_request_config(no_inet)
     await update.message.reply_text(teks)
     await update.message.reply_text(
-        "Foto lengkap. Teruskan pesan di atas ke helpdesk, lalu tekan tombol di bawah.",
-        reply_markup=kb([[InlineKeyboardButton("Sudah request config",
+        "Foto lengkap. <b>Langkah 5 dari 6</b>\n\n"
+        "Teruskan pesan di atas ke helpdesk untuk minta config. Kalau sudah "
+        "terkirim, tekan tombol di bawah.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[InlineKeyboardButton("✅ Sudah kirim ke helpdesk",
                                                callback_data=f"reqconfig|{no_inet}")]]))
 
 
@@ -965,12 +1126,14 @@ async def job_distribusi(ctx: ContextTypes.DEFAULT_TYPE):
         ordr = await db.antrian(t["teknisi_id"], kuota)
         if not ordr:
             continue
-        btn = [[InlineKeyboardButton(f"{r['no_inet']} · {config.LABEL.get(r['status'], r['status'])}",
-                                     callback_data=f"open|{r['no_inet']}")] for r in ordr]
+        btn = [[InlineKeyboardButton(
+            f"{r['no_inet']} — langkah {LANGKAH.get(r['status'], (0, ''))[0]}/{TOTAL_LANGKAH}",
+            callback_data=f"open|{r['no_inet']}")] for r in ordr]
         try:
             await ctx.bot.send_message(
                 t["teknisi_id"],
-                f"Selamat pagi {t['nama'].title()}. Order hari ini ({len(ordr)}):",
+                f"Selamat pagi {t['nama'].title()}.\n\n"
+                f"Ini {len(ordr)} order untuk hari ini. Tekan salah satu untuk mulai.",
                 reply_markup=kb(btn))
             await db.pool().execute(
                 "UPDATE orders SET dikirim_at=now() WHERE no_inet=ANY($1::text[])",
@@ -1006,10 +1169,11 @@ async def job_sla(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(
                 r["teknisi_id"],
-                f"Order {r['no_inet']} sudah {r['jam']:.0f} jam menunggu tiket. "
-                "Kalau tiket sudah terbit, input nomornya.",
+                f"Order {r['no_inet']} sudah {r['jam']:.0f} jam menunggu tiket.\n\n"
+                "Kalau nomor tiketnya sudah keluar di grup, catat di sini supaya "
+                "bisa dilanjutkan. Kalau belum keluar juga, tanyakan ke admin grup.",
                 reply_markup=kb([[InlineKeyboardButton(
-                    "Input nomor tiket", callback_data=f"tiket|{r['no_inet']}")]]))
+                    "📝 Catat nomor tiket", callback_data=f"tiket|{r['no_inet']}")]]))
         except Exception as e:
             log.warning("sla dm gagal %s: %s", r["teknisi_id"], e)
 
@@ -1020,18 +1184,41 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     """Tanpa ini, error di handler mana pun hanya masuk log dan pengguna
     melihat pesan menggantung tanpa penjelasan."""
     log.exception("handler error", exc_info=ctx.error)
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                f"Terjadi kesalahan: {type(ctx.error).__name__} — {ctx.error}\n"
-                "Coba ulangi. Kalau berulang, laporkan ke Officer.")
-        except Exception:
-            pass
+    if not (isinstance(update, Update) and update.effective_message):
+        return
+    try:
+        if await db.is_admin(update.effective_user.id):
+            pesan = (f"Kesalahan sistem: {type(ctx.error).__name__} — {ctx.error}\n"
+                     "Detail lengkap ada di Deploy Logs.")
+        else:
+            pesan = ("Maaf, ada gangguan di sistem sehingga perintah tadi tidak "
+                     "bisa diproses. Pekerjaan Anda tidak hilang.\n\n"
+                     "Coba ulangi sebentar lagi. Kalau masih sama, laporkan ke "
+                     "Officer RJW — jangan dikerjakan manual dulu supaya datanya "
+                     "tidak dobel.")
+        await update.effective_message.reply_text(pesan)
+    except Exception:
+        pass
+
+
+MENU_TEKNISI = [
+    BotCommand("order",     "Lihat order yang harus dikerjakan hari ini"),
+    BotCommand("sisa",      "Berapa order saya yang belum selesai"),
+    BotCommand("ambil",     "Ambil wilayah baru kalau order sudah habis"),
+    BotCommand("klaimsaya", "Wilayah yang sedang saya pegang"),
+    BotCommand("cari",      "Buka order tertentu pakai nomor layanan"),
+    BotCommand("struk",     "Cetak ulang bukti order yang sudah selesai"),
+    BotCommand("batal",     "Batalkan pengisian yang sedang berjalan"),
+    BotCommand("bantuan",   "Cara memakai bot ini"),
+]
 
 
 async def post_init(app: Application):
     await db.init()
     log.info("db siap")
+    # Menu "/" di Telegram — supaya teknisi tidak perlu menghafal perintah.
+    await app.bot.set_my_commands(MENU_TEKNISI, scope=BotCommandScopeDefault())
+    log.info("menu perintah dipasang")
 
 
 async def post_shutdown(app: Application):
