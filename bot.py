@@ -66,7 +66,7 @@ LANGKAH = {
 TOTAL_LANGKAH = 6
 
 
-def kartu(o) -> str:
+def kartu(o, admin: bool = False, sekitar: int = None) -> str:
     lines = [f"<b>No layanan {o['no_inet']}</b>"]
 
     langkah = LANGKAH.get(o["status"])
@@ -106,6 +106,23 @@ def kartu(o) -> str:
                      "Konfirmasi alamat ke pelanggan sebelum berangkat.")
     elif o["flag"] == "MULTI_ONT":
         lines.append("\n⚠ Pelanggan ini punya lebih dari satu ONT.")
+
+    lines.append("")
+    lines.append(f"<b>Wilayah</b> {o['zona']} · <code>{o['group_uid']}</code>")
+    if sekitar:
+        lines.append(f"Di wilayah yang sama masih ada {sekitar} order Anda yang "
+                     "belum selesai — biasanya jaraknya cuma beberapa ratus meter, "
+                     "jadi bisa sekalian dikerjakan.")
+    elif sekitar == 0:
+        lines.append("Ini order terakhir Anda di wilayah ini.")
+
+    if admin:
+        lines.append("")
+        lines.append("<b>Data sistem</b>")
+        lines.append(f"Pemilik : {o['owner_nama'] or 'belum ada'}"
+                     + ("  (override)" if o["teknisi_override"] else ""))
+        lines.append(f"Status  : {o['status']}")
+        lines.append(f"Flag    : {o['flag']}")
     return "\n".join(lines)
 
 
@@ -306,7 +323,9 @@ async def cmd_cari(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(
             f"Order ini dipegang oleh {o['owner_nama'] or 'teknisi lain'}, "
             "bukan Anda.")
-    await update.message.reply_text(kartu(o), parse_mode=ParseMode.HTML,
+    sekitar = (await db.sisa_sekitar(o["group_uid"], t["teknisi_id"], o["no_inet"])
+               if t else None)
+    await update.message.reply_text(kartu(o, admin, sekitar), parse_mode=ParseMode.HTML,
                                     reply_markup=aksi_untuk(o["status"], o["no_inet"]),
                                     disable_web_page_preview=True)
 
@@ -484,8 +503,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not o:
             return await q.message.reply_text("Nomor layanan itu tidak ada di daftar penggantian ONT. "
             "Cek lagi angkanya.")
+        sekitar = (await db.sisa_sekitar(o["group_uid"], uid, o["no_inet"])
+                   if o["owner_id"] == uid else None)
         return await q.message.reply_text(
-            kartu(o), parse_mode=ParseMode.HTML,
+            kartu(o, await db.is_admin(uid), sekitar), parse_mode=ParseMode.HTML,
             reply_markup=aksi_untuk(o["status"], o["no_inet"]),
             disable_web_page_preview=True)
 
