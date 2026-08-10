@@ -213,8 +213,8 @@ async def klaim(group_uid: str, teknisi_id: int, *, lat=None, lon=None,
             await con.execute(
                 """INSERT INTO assignment(group_uid,teknisi_id,assigned_by,
                                           claim_mode,expires_at)
-                   VALUES($1,$2,$2,'self', now() + ($3||' days')::interval)""",
-                group_uid, teknisi_id, str(hari))
+                   VALUES($1,$2,$2,'self', now() + make_interval(days => $3))""",
+                group_uid, teknisi_id, hari)
             await con.execute(
                 """UPDATE orders SET status='ASSIGNED', assigned_at=now(), updated_at=now()
                    WHERE group_uid=$1 AND status='NEW'""", group_uid)
@@ -254,7 +254,7 @@ async def klaim_kedaluwarsa():
     """Klaim mandiri yang klasternya tidak ada aktivitas apa pun selama
     N hari. Berbasis klaster.terakhir_aktif, bukan tanggal klaim — supaya
     klaster yang sedang dikerjakan tidak ikut ditarik."""
-    hari = await get_setting("klaim_expire_hari", "5")
+    hari = int(await get_setting("klaim_expire_hari", "5"))
     return await pool().fetch(
         """SELECT a.group_uid, a.teknisi_id, COUNT(o.no_inet) AS sisa,
                   EXTRACT(DAY FROM now()-k.terakhir_aktif)::INT AS diam_hari
@@ -263,9 +263,9 @@ async def klaim_kedaluwarsa():
            JOIN orders o  ON o.group_uid = a.group_uid
                          AND o.status NOT IN ('CLOSED','BATAL')
            WHERE a.aktif AND a.claim_mode='self'
-             AND k.terakhir_aktif < now() - ($1||' days')::interval
+             AND k.terakhir_aktif < now() - make_interval(days => $1)
            GROUP BY a.group_uid, a.teknisi_id, k.terakhir_aktif""",
-        str(hari))
+        hari)
 
 
 async def set_prioritas(group_uid: str, nyala: bool) -> bool:
@@ -322,14 +322,14 @@ async def laju_harian(hari: int = 7):
         """SELECT COUNT(*)::float / GREATEST($1,1)
            FROM progress
            WHERE status_to='CLOSED'
-             AND ts >= now() - ($1||' days')::interval""", hari)
+             AND ts >= now() - make_interval(days => $1)""", hari)
 
 
 async def tren_harian(hari: int = 14):
     return await pool().fetch(
         """SELECT (ts AT TIME ZONE 'Asia/Jakarta')::date AS tgl, COUNT(*) AS n
            FROM progress
-           WHERE status_to='CLOSED' AND ts >= now() - ($1||' days')::interval
+           WHERE status_to='CLOSED' AND ts >= now() - make_interval(days => $1)
            GROUP BY 1 ORDER BY 1 DESC""", hari)
 
 
