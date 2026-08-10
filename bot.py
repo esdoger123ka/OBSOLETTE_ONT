@@ -1,6 +1,10 @@
+import io
 import logging
 import re
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+
+from openpyxl import Workbook
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -653,19 +657,26 @@ def admin_only(fn):
 @admin_only
 async def cmd_adminhelp(update: Update, ctx):
     await update.message.reply_text(
-        "/beban — sisa order per teknisi\n"
-        "/assign <group_uid> <nama|nik> — pindah satu klaster\n"
-        "/pindahzona <zona> <nama|nik> — pindah seluruh zona\n"
-        "/stagnan — klaster tanpa progres\n"
+        "<b>Pantauan</b>\n"
+        "/progres — selesai vs total, laju, perkiraan sisa waktu\n"
+        "/hariini — aktivitas hari ini vs kemarin, siapa yang menutup\n"
         "/rekap — funnel status + pareto kendala\n"
-        "/tunggutiket — order yang mandek menunggu tiket\n"
+        "/beban — sisa order per teknisi\n"
+        "/tunggutiket — order mandek menunggu tiket\n"
+        "/stagnan — klaster tanpa progres\n"
+        "/export — seluruh data ke Excel\n\n"
+        "<b>Penugasan</b>\n"
+        "/assign &lt;group_uid&gt; &lt;nama|nik&gt; — pindah satu klaster\n"
+        "/pindahzona &lt;zona&gt; &lt;nama|nik&gt; — pindah seluruh zona\n"
         "/onboarding — siapa yang belum tekan /start\n"
-        "/setkuota <n> — kuota order per teknisi per hari\n"
-        "/nonaktif <nama|nik> — nonaktifkan teknisi\n\n"
+        "/setkuota &lt;n&gt; — kuota order per teknisi per hari\n"
+        "/nonaktif &lt;nama|nik&gt; — nonaktifkan teknisi\n\n"
         "<b>Kolam klaim</b>\n"
         "/kolam — klaster tanpa pemilik\n"
-        "/dorong <group_uid> — paksa ke puncak daftar semua teknisi\n"
-        "/lepaspaksa <group_uid> — tarik klaster kembali ke kolam",
+        "/dorong &lt;group_uid&gt; — paksa ke puncak daftar semua teknisi\n"
+        "/lepaspaksa &lt;group_uid&gt; — tarik klaster kembali ke kolam\n\n"
+        "<b>Lain-lain</b>\n"
+        "/cari &lt;no_inet&gt; · /struk &lt;no_inet&gt;",
         parse_mode=ParseMode.HTML)
 
 
@@ -807,6 +818,99 @@ async def cmd_lepaspaksa(update: Update, ctx):
 
 
 @admin_only
+async def cmd_hariini(update: Update, ctx):
+    hari_ini = await db.produksi_hari(0)
+    kemarin = await db.produksi_hari(1)
+    kmap = {r["status_to"]: r["n"] for r in kemarin}
+    out = ["<b>Aktivitas hari ini</b>", "<code>hari ini  kemarin  tahap</code>"]
+    if not hari_ini:
+        out.append("Belum ada aktivitas.")
+    for r in hari_ini:
+        lab = config.LABEL.get(r["status_to"], r["status_to"])
+        out.append(f"<code>{r['n']:>8} {kmap.get(r['status_to'], 0):>9}</code>  {lab}")
+    top = await db.top_teknisi_hari()
+    if top:
+        out.append("\n<b>Order ditutup hari ini</b>")
+        for t in top:
+            out.append(f"{t['n']:>3}  {t['nama']}")
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_progres(update: Update, ctx):
+    p = await db.progres_kumulatif()
+    laju = await db.laju_harian(7) or 0
+    sisa = p["total"] - p["closed"]
+    pct = 100 * p["closed"] / p["total"] if p["total"] else 0
+    out = [
+        "<b>Progres keseluruhan</b>",
+        f"Selesai      : {p['closed']} / {p['total']}  ({pct:.1f}%)",
+        f"Sedang jalan : {p['jalan']}",
+        f"Kendala      : {p['kendala']}",
+        f"Belum assign : {p['belum_assign']}",
+        "",
+        f"Laju 7 hari terakhir: {laju:.1f} order/hari",
+    ]
+    if laju > 0:
+        hk = sisa / laju
+        out.append(f"Perkiraan sisa waktu: {hk:.0f} hari kerja "
+                   f"(~{hk/26:.1f} bulan) pada laju ini")
+    else:
+        out.append("Belum bisa memperkirakan sisa waktu — belum ada order ditutup.")
+    tren = await db.tren_harian(7)
+    if tren:
+        out.append("\n<b>7 hari terakhir</b>")
+        for t in tren:
+            out.append(f"{t['tgl']:%d %b} : {t['n']}")
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_export(update: Update, ctx):
+    await update.message.reply_text("Menyiapkan file, tunggu sebentar...")
+    rows = await db.detail_export()
+    if not rows:
+        return await update.message.reply_text("Tidak ada data.")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DETAIL"
+    kolom = list(rows[0].keys())
+    ws.append(kolom)
+    for r in rows:
+        ws.append([r[c] for c in kolom])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    ws2 = wb.create_sheet("RINGKASAN")
+    ws2.append(["Status", "Jumlah"])
+    for r in await db.funnel():
+        ws2.append([config.LABEL.get(r["status"], r["status"]), r["n"]])
+    ws2.append([])
+    ws2.append(["Kode kendala", "Keterangan", "Jumlah"])
+    for r in await db.pareto_kendala():
+        ws2.append([r["kode_kendala"], r["label"], r["n"]])
+
+    ws3 = wb.create_sheet("PER_TEKNISI")
+    ws3.append(["Teknisi", "Sisa", "Kendala", "Tunggu tiket", "Selesai", "Total"])
+    for r in await db.beban():
+        ws3.append([r["nama"], r["sisa"], r["kendala"], r["tunggu_tiket"],
+                    r["closed"], r["total"]])
+
+    ws4 = wb.create_sheet("TREN_HARIAN")
+    ws4.append(["Tanggal", "Order ditutup"])
+    for r in await db.tren_harian(30):
+        ws4.append([r["tgl"], r["n"]])
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    nama = f"MONITORING_ONT_RJW_{datetime.now(ZoneInfo(config.TZ)):%Y%m%d_%H%M}.xlsx"
+    await update.message.reply_document(document=bio, filename=nama,
+                                        caption=f"{len(rows)} order")
+
+
+@admin_only
 async def cmd_setkuota(update: Update, ctx):
     if not ctx.args or not ctx.args[0].isdigit():
         k = await db.get_setting("kuota_harian", "3")
@@ -936,6 +1040,9 @@ def main():
     app.add_handler(CommandHandler("kolam", cmd_kolam))
     app.add_handler(CommandHandler("dorong", cmd_dorong))
     app.add_handler(CommandHandler("lepaspaksa", cmd_lepaspaksa))
+    app.add_handler(CommandHandler("hariini", cmd_hariini))
+    app.add_handler(CommandHandler("progres", cmd_progres))
+    app.add_handler(CommandHandler("export", cmd_export))
 
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
@@ -943,8 +1050,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     jq = app.job_queue
-    import zoneinfo
-    tz = zoneinfo.ZoneInfo(config.TZ)
+    tz = ZoneInfo(config.TZ)
     jq.run_daily(job_distribusi, time=datetime.strptime("07:30", "%H:%M").time().replace(tzinfo=tz))
     jq.run_repeating(job_sla, interval=timedelta(hours=2), first=timedelta(minutes=5))
     jq.run_daily(job_expire, time=datetime.strptime("06:00", "%H:%M").time().replace(tzinfo=tz))
