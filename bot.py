@@ -246,16 +246,28 @@ async def cmd_struk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # klaim mandiri
 # ============================================================
 
+async def batas_klaim(uid: int):
+    """None kalau boleh klaim, atau pesan penolakan."""
+    maks = int(await db.get_setting("max_klaim_aktif", "2"))
+    maks_pegang = int(await db.get_setting("max_klaster_pegang", "4"))
+    aktif, pegang = await db.klaim_aktif(uid)
+    if pegang >= maks_pegang:
+        return (f"Anda memegang {pegang} klaster hasil klaim (batas {maks_pegang}), "
+                f"termasuk yang sedang terparkir karena kendala.\n"
+                "Selesaikan atau lepas salah satu lewat /klaimsaya.")
+    if aktif >= maks:
+        return (f"Anda punya {aktif} klaster yang masih bisa dikerjakan "
+                f"(batas {maks}). Selesaikan dulu sebelum ambil yang baru.")
+    return None
+
+
 async def cmd_ambil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = await guard(update)
     if not t:
         return await update.message.reply_text("Anda belum terdaftar. Ketik /start.")
-    maks = int(await db.get_setting("max_klaim_aktif", "2"))
-    n = await db.klaim_aktif(t["teknisi_id"])
-    if n >= maks:
-        return await update.message.reply_text(
-            f"Anda sedang memegang {n} klaster hasil klaim (maksimal {maks}).\n"
-            "Selesaikan dulu, atau lepas salah satu lewat /klaimsaya.")
+    tolak = await batas_klaim(t["teknisi_id"])
+    if tolak:
+        return await update.message.reply_text(tolak)
     await update.message.reply_text(
         "Kirim lokasi Anda sekarang. Tekan tombol di bawah — jangan pilih titik "
         "manual di peta, karena lokasi manual akan ditandai di catatan.",
@@ -297,10 +309,9 @@ async def on_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def do_klaim(q, ctx, group_uid: str, uid: int):
-    maks = int(await db.get_setting("max_klaim_aktif", "2"))
-    if await db.klaim_aktif(uid) >= maks:
-        return await q.message.reply_text(
-            f"Batas {maks} klaster aktif sudah tercapai.")
+    tolak = await batas_klaim(uid)
+    if tolak:
+        return await q.message.reply_text(tolak)
     lat, lon, live = ctx.user_data.get("lokasi", (None, None, None))
     jarak = None
     if lat is not None:
@@ -856,8 +867,8 @@ async def job_expire(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(
                 r["teknisi_id"],
-                f"Klaster {r['group_uid']} ({r['sisa']} order tersisa) sudah melewati "
-                "tenggat tanpa progres dan dikembalikan ke kolam. "
+                f"Klaster {r['group_uid']} ({r['sisa']} order tersisa) tidak ada "
+                f"aktivitas selama {r['diam_hari']} hari dan dikembalikan ke kolam. "
                 "Ambil lagi lewat /ambil kalau masih ingin mengerjakannya.")
         except Exception as e:
             log.warning("notifikasi kedaluwarsa gagal %s: %s", r["teknisi_id"], e)
