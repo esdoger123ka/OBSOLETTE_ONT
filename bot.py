@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import re
@@ -865,13 +866,8 @@ async def cmd_progres(update: Update, ctx):
     await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 
 
-@admin_only
-async def cmd_export(update: Update, ctx):
-    await update.message.reply_text("Menyiapkan file, tunggu sebentar...")
-    rows = await db.detail_export()
-    if not rows:
-        return await update.message.reply_text("Tidak ada data.")
-
+def _bangun_workbook(rows, funnel, pareto, beban, tren) -> bytes:
+    """Blocking. Dipanggil lewat asyncio.to_thread supaya polling tidak berhenti."""
     wb = Workbook()
     ws = wb.active
     ws.title = "DETAIL"
@@ -884,30 +880,49 @@ async def cmd_export(update: Update, ctx):
 
     ws2 = wb.create_sheet("RINGKASAN")
     ws2.append(["Status", "Jumlah"])
-    for r in await db.funnel():
+    for r in funnel:
         ws2.append([config.LABEL.get(r["status"], r["status"]), r["n"]])
     ws2.append([])
     ws2.append(["Kode kendala", "Keterangan", "Jumlah"])
-    for r in await db.pareto_kendala():
+    for r in pareto:
         ws2.append([r["kode_kendala"], r["label"], r["n"]])
 
     ws3 = wb.create_sheet("PER_TEKNISI")
     ws3.append(["Teknisi", "Sisa", "Kendala", "Tunggu tiket", "Selesai", "Total"])
-    for r in await db.beban():
+    for r in beban:
         ws3.append([r["nama"], r["sisa"], r["kendala"], r["tunggu_tiket"],
                     r["closed"], r["total"]])
 
     ws4 = wb.create_sheet("TREN_HARIAN")
     ws4.append(["Tanggal", "Order ditutup"])
-    for r in await db.tren_harian(30):
+    for r in tren:
         ws4.append([r["tgl"], r["n"]])
 
     bio = io.BytesIO()
     wb.save(bio)
-    bio.seek(0)
-    nama = f"MONITORING_ONT_RJW_{datetime.now(ZoneInfo(config.TZ)):%Y%m%d_%H%M}.xlsx"
-    await update.message.reply_document(document=bio, filename=nama,
-                                        caption=f"{len(rows)} order")
+    return bio.getvalue()
+
+
+@admin_only
+async def cmd_export(update: Update, ctx):
+    await update.message.reply_text("Menyiapkan file, tunggu sebentar...")
+    try:
+        rows = await db.detail_export()
+        if not rows:
+            return await update.message.reply_text("Tidak ada data.")
+        paket = await asyncio.to_thread(
+            _bangun_workbook, rows,
+            await db.funnel(), await db.pareto_kendala(),
+            await db.beban(), await db.tren_harian(30))
+        nama = f"MONITORING_ONT_RJW_{datetime.now(ZoneInfo(config.TZ)):%Y%m%d_%H%M}.xlsx"
+        await update.message.reply_document(
+            document=io.BytesIO(paket), filename=nama,
+            caption=f"{len(rows)} order · {len(paket)/1e6:.1f} MB")
+    except Exception as e:
+        log.exception("export gagal")
+        await update.message.reply_text(
+            f"Export gagal: {type(e).__name__} — {e}\n"
+            "Detail lengkapnya ada di Deploy Logs.")
 
 
 @admin_only
@@ -1001,6 +1016,19 @@ async def job_sla(ctx: ContextTypes.DEFAULT_TYPE):
 
 # ============================================================
 
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    """Tanpa ini, error di handler mana pun hanya masuk log dan pengguna
+    melihat pesan menggantung tanpa penjelasan."""
+    log.exception("handler error", exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                f"Terjadi kesalahan: {type(ctx.error).__name__} — {ctx.error}\n"
+                "Coba ulangi. Kalau berulang, laporkan ke Officer.")
+        except Exception:
+            pass
+
+
 async def post_init(app: Application):
     await db.init()
     log.info("db siap")
@@ -1048,6 +1076,8 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    app.add_error_handler(on_error)
 
     jq = app.job_queue
     tz = ZoneInfo(config.TZ)
