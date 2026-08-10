@@ -1000,8 +1000,8 @@ async def job_sla(ctx: ContextTypes.DEFAULT_TYPE):
         """SELECT o.no_inet, v.teknisi_id,
                   EXTRACT(EPOCH FROM now()-o.req_tiket_at)/3600 AS jam
            FROM orders o JOIN v_order_owner v ON v.no_inet=o.no_inet
-           WHERE o.status='REQ_TIKET' AND o.req_tiket_at < now() - ($1||' hours')::interval""",
-        str(sla_t))
+           WHERE o.status='REQ_TIKET' AND o.req_tiket_at < now() - make_interval(hours => $1)""",
+        sla_t)
     for r in rows:
         try:
             await ctx.bot.send_message(
