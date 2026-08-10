@@ -282,6 +282,77 @@ async def ringkas_kolam():
            FROM v_kolam""")
 
 
+# ---------------- monitoring ----------------
+
+async def produksi_hari(tanggal_offset: int = 0):
+    """Jumlah transisi status hari ini (atau H-n), berbasis tabel progress."""
+    return await pool().fetch(
+        """SELECT status_to, COUNT(*) AS n
+           FROM progress
+           WHERE (ts AT TIME ZONE 'Asia/Jakarta')::date
+                 = (now() AT TIME ZONE 'Asia/Jakarta')::date - $1::int
+           GROUP BY status_to ORDER BY n DESC""",
+        tanggal_offset)
+
+
+async def top_teknisi_hari(batas: int = 10):
+    return await pool().fetch(
+        """SELECT t.nama, COUNT(*) AS n
+           FROM progress p JOIN teknisi t ON t.teknisi_id = p.actor
+           WHERE p.status_to = 'CLOSED'
+             AND (p.ts AT TIME ZONE 'Asia/Jakarta')::date
+                 = (now() AT TIME ZONE 'Asia/Jakarta')::date
+           GROUP BY t.nama ORDER BY n DESC LIMIT $1""", batas)
+
+
+async def progres_kumulatif():
+    return await pool().fetchrow(
+        """SELECT
+             COUNT(*)                                          AS total,
+             COUNT(*) FILTER (WHERE status='CLOSED')           AS closed,
+             COUNT(*) FILTER (WHERE status='KENDALA')          AS kendala,
+             COUNT(*) FILTER (WHERE status='NEW')              AS belum_assign,
+             COUNT(*) FILTER (WHERE status NOT IN ('CLOSED','BATAL','NEW')) AS jalan
+           FROM orders""")
+
+
+async def laju_harian(hari: int = 7):
+    """Rata-rata order ditutup per hari selama N hari terakhir."""
+    return await pool().fetchval(
+        """SELECT COUNT(*)::float / GREATEST($1,1)
+           FROM progress
+           WHERE status_to='CLOSED'
+             AND ts >= now() - ($1||' days')::interval""", hari)
+
+
+async def tren_harian(hari: int = 14):
+    return await pool().fetch(
+        """SELECT (ts AT TIME ZONE 'Asia/Jakarta')::date AS tgl, COUNT(*) AS n
+           FROM progress
+           WHERE status_to='CLOSED' AND ts >= now() - ($1||' days')::interval
+           GROUP BY 1 ORDER BY 1 DESC""", hari)
+
+
+async def detail_export():
+    return await pool().fetch(
+        """SELECT o.no_inet, o.group_uid, o.zona, o.flag, o.status,
+                  k.nama AS teknisi, o.speed_mb, o.vendor_old, o.type_old,
+                  o.sn_old, o.sn_new, t.no_tiket, t.jenis AS jenis_tiket,
+                  o.kode_kendala, o.catatan_kendala, o.followup_date, o.percobaan,
+                  to_char(o.caring_at    AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS caring,
+                  to_char(o.req_tiket_at AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS req_tiket,
+                  to_char(o.tiket_at     AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS tiket_terbit,
+                  to_char(o.ganti_at     AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS ganti_ont,
+                  to_char(o.config_at    AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS config_ok,
+                  to_char(o.closed_at    AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS closed,
+                  o.lat, o.lon
+           FROM orders o
+           LEFT JOIN v_order_owner v ON v.no_inet = o.no_inet
+           LEFT JOIN teknisi k       ON k.teknisi_id = v.teknisi_id
+           LEFT JOIN tickets t       ON t.no_inet = o.no_inet
+           ORDER BY o.zona, o.group_uid, o.no_inet""")
+
+
 async def klaster_zona(zona: str):
     return await pool().fetch(
         "SELECT DISTINCT group_uid FROM orders WHERE zona=$1 ORDER BY group_uid", zona
