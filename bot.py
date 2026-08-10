@@ -60,6 +60,21 @@ def kartu(o) -> str:
     return "\n".join(lines)
 
 
+async def teks_request_config(no_inet: str) -> str:
+    """Format request config yang siap di-forward ke helpdesk."""
+    r = await db.pool().fetchrow(
+        """SELECT o.no_inet, o.sn_old, o.sn_new, t.no_tiket
+           FROM orders o LEFT JOIN tickets t ON t.no_inet = o.no_inet
+           WHERE o.no_inet = $1""", no_inet)
+    if not r:
+        return None
+    return ("#request\n"
+            f"NO TIKET : {r['no_tiket'] or '-'}\n"
+            f"NO LAYANAN : {r['no_inet']}\n"
+            f"SN LAMA : {r['sn_old'] or '-'}\n"
+            f"SN BARU : {r['sn_new'] or '-'}")
+
+
 def aksi_untuk(status: str, no_inet: str):
     """Tombol yang relevan dengan status saat ini saja."""
     m = {
@@ -68,7 +83,8 @@ def aksi_untuk(status: str, no_inet: str):
         "CARING_OK": [("Sudah request tiket di grup", "reqtiket"), ("Ada kendala", "kendala")],
         "REQ_TIKET": [("Input nomor tiket", "tiket"), ("Ada kendala", "kendala")],
         "TIKET_OPEN": [("Input SN baru", "sn"), ("Ada kendala", "kendala")],
-        "GANTI_OK": [("Sudah request config", "reqconfig")],
+        "GANTI_OK": [("Kirim ulang format request", "fmtconfig"),
+                     ("Sudah request config", "reqconfig")],
         "REQ_CONFIG": [("Config OK", "configok")],
         "CONFIG_OK": [("Close order", "close")],
     }
@@ -403,6 +419,14 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(f"{ref['label']}. Kirim {minta}.")
         return await simpan_kendala(q.message, arg, kode_kendala, uid, None, None)
 
+    if aksi == "fmtconfig":
+        teks = await teks_request_config(arg)
+        await q.message.reply_text(teks)
+        return await q.message.reply_text(
+            "Teruskan pesan di atas ke helpdesk, lalu tekan tombol di bawah.",
+            reply_markup=kb([[InlineKeyboardButton("Sudah request config",
+                                                   callback_data=f"reqconfig|{arg}")]]))
+
     if aksi == "reqconfig":
         await db.transisi(arg, "REQ_CONFIG", uid, extra_sql=", req_config_at=now()")
         return await q.message.reply_text(
@@ -549,8 +573,10 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "UPDATE orders SET foto_terpasang=$2, updated_at=now() WHERE no_inet=$1",
         no_inet, fid)
     ctx.user_data.pop("pending")
+    teks = await teks_request_config(no_inet)
+    await update.message.reply_text(teks)
     await update.message.reply_text(
-        "Foto lengkap. Lanjut request config ke helpdesk.",
+        "Foto lengkap. Teruskan pesan di atas ke helpdesk, lalu tekan tombol di bawah.",
         reply_markup=kb([[InlineKeyboardButton("Sudah request config",
                                                callback_data=f"reqconfig|{no_inet}")]]))
 
