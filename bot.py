@@ -889,6 +889,24 @@ BANTUAN_ADMIN = {
    "Contoh: /lepaspaksa RPLONT-04D26E\n\n"
    "Dipakai kalau teknisi menghilang dan Anda belum tahu harus dialihkan ke "
    "siapa — biarkan siapa pun yang lewat mengambilnya."),
+ "tambahteknisi": ("Mendaftarkan teknisi baru.\n\n"
+   "Format: /tambahteknisi <nomor_telegram> <nik> <nama lengkap>\n"
+   "Contoh: /tambahteknisi 473776150 18980067 AHMAD RIZAL\n\n"
+   "Nomor Telegram-nya didapat dari orangnya sendiri: suruh dia kirim /start "
+   "ke bot ini, bot akan membalas dengan nomornya. Setelah terdaftar, dia "
+   "belum punya pekerjaan — beri lewat /assign atau /pindahzona."),
+ "tambahadmin": ("Memberi akses admin ke seseorang.\n\n"
+   "Format: /tambahadmin <nomor_telegram> <nama>\n\n"
+   "Admin bisa memakai semua perintah pemantauan dan penugasan, termasuk "
+   "memindahkan pekerjaan orang. Beri hanya ke yang memang mengelola program."),
+ "hapusadmin": ("Mencabut akses admin.\n\n"
+   "Nomornya dilihat di /daftaradmin. Anda tidak bisa mencabut akses diri "
+   "sendiri. Admin yang berasal dari setelan Railway (BOOTSTRAP_ADMINS) juga "
+   "tidak bisa dicabut dari sini — harus lewat Railway."),
+ "aktifkan": ("Mengaktifkan kembali teknisi yang pernah dinonaktifkan.\n\n"
+   "Format: /aktifkan <nama|nik>\n\n"
+   "Order yang dulu atas namanya tidak otomatis kembali — kalau sudah "
+   "dipindahkan, harus dipindahkan lagi secara manual."),
  "dorong": ("Memaksa satu klaster muncul di puncak daftar /ambil semua "
    "teknisi, dengan tanda bintang, mengabaikan batas jarak 3 km.\n\n"
    "Contoh: /dorong RPLONT-04D26E\nBatalkan: /dorong RPLONT-04D26E off\n\n"
@@ -923,6 +941,12 @@ async def cmd_adminhelp(update: Update, ctx):
         "/nonaktif — hentikan distribusi ke seorang teknisi\n"
         "/setkuota — atur jatah order harian\n"
         "/onboarding — siapa yang belum menekan /start\n\n"
+        "<b>Kelola pengguna</b>\n"
+        "/tambahteknisi — daftarkan teknisi baru\n"
+        "/aktifkan — aktifkan kembali teknisi nonaktif\n"
+        "/tambahadmin — beri akses admin\n"
+        "/hapusadmin — cabut akses admin\n"
+        "/daftaradmin — siapa saja yang punya akses admin\n\n"
         "<b>Kolam pekerjaan bebas</b>\n"
         "/kolam — klaster tanpa pemilik\n"
         "/lepaspaksa — cabut klaster, kembalikan ke kolam\n"
@@ -1178,6 +1202,102 @@ async def cmd_export(update: Update, ctx):
 
 
 @admin_only
+async def cmd_tambahteknisi(update: Update, ctx):
+    if len(ctx.args) < 3 or not ctx.args[0].isdigit():
+        return await update.message.reply_text(
+            "Format: /tambahteknisi <nomor_telegram> <nik> <nama lengkap>\n\n"
+            "Contoh:\n/tambahteknisi 473776150 18980067 AHMAD RIZAL\n\n"
+            "Nomor Telegram didapat dari orangnya: suruh dia kirim /start ke bot "
+            "ini, nanti bot membalas dengan nomornya.")
+    uid, nik = int(ctx.args[0]), ctx.args[1]
+    nama = " ".join(ctx.args[2:]).upper()
+    hasil = await db.tambah_teknisi(uid, nik, nama)
+    if hasil == "nik_dipakai":
+        return await update.message.reply_text(
+            f"NIK {nik} sudah dipakai teknisi lain. Cek lagi NIK-nya.")
+    if hasil == "diperbarui":
+        return await update.message.reply_text(
+            f"Data {nama} diperbarui dan statusnya diaktifkan kembali.")
+    await update.message.reply_text(
+        f"{nama} ({nik}) terdaftar sebagai teknisi.\n\n"
+        "Dua langkah lagi:\n"
+        "1. Suruh dia kirim /start ke bot supaya bisa menerima pesan\n"
+        "2. Beri dia pekerjaan — /assign atau /pindahzona, atau biarkan dia "
+        "mengambil sendiri lewat /ambil kalau kolam ada isinya")
+
+
+@admin_only
+async def cmd_tambahadmin(update: Update, ctx):
+    if len(ctx.args) < 2 or not ctx.args[0].isdigit():
+        return await update.message.reply_text(
+            "Format: /tambahadmin <nomor_telegram> <nama>\n\n"
+            "Contoh:\n/tambahadmin 473776150 BUDI SANTOSO\n\n"
+            "Admin bisa memakai semua perintah pemantauan dan penugasan. "
+            "Beri akses ini hanya ke orang yang memang mengelola program.")
+    uid = int(ctx.args[0])
+    nama = " ".join(ctx.args[1:]).upper()
+    baru = await db.tambah_admin(uid, nama)
+    await update.message.reply_text(
+        f"{nama} sekarang admin. Suruh dia kirim /start ke bot."
+        if baru else f"Data admin {nama} diperbarui.")
+
+
+@admin_only
+async def cmd_hapusadmin(update: Update, ctx):
+    if not ctx.args or not ctx.args[0].isdigit():
+        return await update.message.reply_text(
+            "Format: /hapusadmin <nomor_telegram>\n"
+            "Nomornya bisa dilihat di /daftaradmin.")
+    uid = int(ctx.args[0])
+    if uid == update.effective_user.id:
+        return await update.message.reply_text(
+            "Tidak bisa menghapus akses admin Anda sendiri.")
+    if await db.hapus_admin(uid):
+        return await update.message.reply_text("Akses admin dicabut.")
+    await update.message.reply_text(
+        "Nomor itu tidak ada di daftar admin.\n\n"
+        "Kalau dia tetap bisa memakai perintah admin, berarti nomornya "
+        "tercantum di variabel BOOTSTRAP_ADMINS di Railway — hapus dari sana.")
+
+
+@admin_only
+async def cmd_daftaradmin(update: Update, ctx):
+    rows = await db.daftar_admin()
+    out = ["<b>Admin</b>"]
+    for r in rows:
+        out.append(f"{r['nama']} · <code>{r['teknisi_id']}</code>")
+    if not rows:
+        out.append("Belum ada admin yang ditambahkan lewat bot.")
+    if config.BOOTSTRAP_ADMINS:
+        out.append("\n<b>Admin bawaan (dari setelan Railway)</b>")
+        for a in config.BOOTSTRAP_ADMINS:
+            out.append(f"<code>{a}</code>")
+        out.append("\nYang ini hanya bisa dihapus lewat variabel "
+                   "BOOTSTRAP_ADMINS di Railway.")
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_aktifkan(update: Update, ctx):
+    if not ctx.args:
+        return await update.message.reply_text("Format: /aktifkan <nama|nik>")
+    cand = await db.pool().fetch(
+        """SELECT teknisi_id, nik, nama, aktif FROM teknisi
+           WHERE nama ILIKE '%'||$1||'%' OR nik=$1 OR teknisi_id::TEXT=$1
+           ORDER BY nama LIMIT 10""", " ".join(ctx.args))
+    if len(cand) != 1:
+        return await update.message.reply_text(
+            "Teknisi tidak ditemukan." if not cand
+            else "Nama tidak unik: " + ", ".join(c["nama"] for c in cand))
+    if cand[0]["aktif"]:
+        return await update.message.reply_text(
+            f"{cand[0]['nama']} memang sudah aktif.")
+    await db.aktifkan_teknisi(cand[0]["teknisi_id"])
+    await update.message.reply_text(
+        f"{cand[0]['nama']} diaktifkan kembali dan akan menerima distribusi pagi.")
+
+
+@admin_only
 async def cmd_setkuota(update: Update, ctx):
     if not ctx.args or not ctx.args[0].isdigit():
         k = await db.get_setting("kuota_harian", "3")
@@ -1341,6 +1461,11 @@ def main():
     app.add_handler(CommandHandler("rekap", cmd_rekap))
     app.add_handler(CommandHandler("tunggutiket", cmd_tunggutiket))
     app.add_handler(CommandHandler("onboarding", cmd_onboarding))
+    app.add_handler(CommandHandler("tambahteknisi", cmd_tambahteknisi))
+    app.add_handler(CommandHandler("aktifkan", cmd_aktifkan))
+    app.add_handler(CommandHandler("tambahadmin", cmd_tambahadmin))
+    app.add_handler(CommandHandler("hapusadmin", cmd_hapusadmin))
+    app.add_handler(CommandHandler("daftaradmin", cmd_daftaradmin))
     app.add_handler(CommandHandler("setkuota", cmd_setkuota))
     app.add_handler(CommandHandler("nonaktif", cmd_nonaktif))
     app.add_handler(CommandHandler("kolam", cmd_kolam))
