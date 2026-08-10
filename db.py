@@ -353,6 +353,15 @@ async def detail_export():
            ORDER BY o.zona, o.group_uid, o.no_inet""")
 
 
+async def sisa_sekitar(group_uid: str, teknisi_id: int, kecuali: str) -> int:
+    """Order lain milik teknisi ini di klaster yang sama dan belum selesai."""
+    return await pool().fetchval(
+        """SELECT COUNT(*) FROM v_order_owner
+           WHERE group_uid=$1 AND teknisi_id=$2 AND no_inet<>$3
+             AND status NOT IN ('CLOSED','BATAL')""",
+        group_uid, teknisi_id, kecuali) or 0
+
+
 async def klaster_zona(zona: str):
     return await pool().fetch(
         "SELECT DISTINCT group_uid FROM orders WHERE zona=$1 ORDER BY group_uid", zona
