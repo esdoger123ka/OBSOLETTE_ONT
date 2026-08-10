@@ -192,10 +192,11 @@ async def kolam_terdekat(lat: float, lon: float, radius_km: float, limit: int = 
     )
 
 
-async def klaim_aktif(teknisi_id: int) -> int:
-    n = await pool().fetchval(
-        "SELECT n_klaim FROM v_klaim_aktif WHERE teknisi_id=$1", teknisi_id)
-    return n or 0
+async def klaim_aktif(teknisi_id: int) -> tuple:
+    """(klaster yang masih bisa dikerjakan, total klaster hasil klaim)."""
+    r = await pool().fetchrow(
+        "SELECT n_klaim, n_pegang FROM v_klaim_aktif WHERE teknisi_id=$1", teknisi_id)
+    return (r["n_klaim"], r["n_pegang"]) if r else (0, 0)
 
 
 async def klaim(group_uid: str, teknisi_id: int, *, lat=None, lon=None,
@@ -250,14 +251,21 @@ async def klaim_saya(teknisi_id: int):
 
 
 async def klaim_kedaluwarsa():
-    """Klaim mandiri yang lewat tenggat dan masih ada sisa order."""
+    """Klaim mandiri yang klasternya tidak ada aktivitas apa pun selama
+    N hari. Berbasis klaster.terakhir_aktif, bukan tanggal klaim — supaya
+    klaster yang sedang dikerjakan tidak ikut ditarik."""
+    hari = await get_setting("klaim_expire_hari", "5")
     return await pool().fetch(
-        """SELECT a.group_uid, a.teknisi_id, COUNT(o.no_inet) AS sisa
+        """SELECT a.group_uid, a.teknisi_id, COUNT(o.no_inet) AS sisa,
+                  EXTRACT(DAY FROM now()-k.terakhir_aktif)::INT AS diam_hari
            FROM assignment a
-           JOIN orders o ON o.group_uid=a.group_uid AND o.status NOT IN ('CLOSED','BATAL')
+           JOIN klaster k ON k.group_uid = a.group_uid
+           JOIN orders o  ON o.group_uid = a.group_uid
+                         AND o.status NOT IN ('CLOSED','BATAL')
            WHERE a.aktif AND a.claim_mode='self'
-             AND a.expires_at IS NOT NULL AND a.expires_at < now()
-           GROUP BY a.group_uid, a.teknisi_id""")
+             AND k.terakhir_aktif < now() - ($1||' days')::interval
+           GROUP BY a.group_uid, a.teknisi_id, k.terakhir_aktif""",
+        str(hari))
 
 
 async def set_prioritas(group_uid: str, nyala: bool) -> bool:
