@@ -816,29 +816,99 @@ def admin_only(fn):
     return wrap
 
 
+BANTUAN_ADMIN = {
+ "progres": ("Sejauh mana keseluruhan program, dan kapan kira-kira selesai.\n\n"
+   "Menampilkan selesai vs total, laju rata-rata 7 hari terakhir, lalu "
+   "memperkirakan sisa hari kerja dari laju itu. Angka perkiraan inilah yang "
+   "bisa dipakai untuk melapor ke atasan — bukan perkiraan, tapi hitungan "
+   "dari data nyata.\n\nPakai seminggu sekali."),
+ "hariini": ("Apa yang terjadi hari ini, dibandingkan kemarin.\n\n"
+   "Yang penting dibaca bukan angka close saja, tapi perbandingan antar tahap. "
+   "Kalau caring 80 tapi close 3 selama beberapa hari, berarti ada sumbatan di "
+   "tengah dan itu bukan salah teknisi.\n\nPakai tiap sore."),
+ "tunggutiket": ("Order yang sudah minta tiket tapi tiketnya belum terbit, "
+   "diurut dari yang paling lama menunggu.\n\n"
+   "Kalau daftar ini panjang dan umurnya puluhan jam, hambatannya ada di admin "
+   "grup TSEL, bukan di teknisi. Ini bukti angka kalau nanti target meleset."),
+ "beban": ("Sisa order per teknisi: sisa, kendala, tunggu tiket.\n\n"
+   "Yang dicari bukan angka sisa — awalnya semua sekitar 80. Yang dicari nama "
+   "dengan angka kendala jauh di atas rata-rata. Tanda ⚠ berarti orang itu "
+   "belum menekan /start, jadi bot belum bisa mengirim apa pun kepadanya."),
+ "stagnan": ("Klaster yang tidak ada progres sama sekali selama 7 hari.\n\n"
+   "Pengaman terhadap teknisi yang berhenti bekerja tanpa memberi tahu — cuti, "
+   "sakit, resign. Tanpa ini, 80 order bisa diam sebulan tanpa ketahuan."),
+ "export": ("Seluruh data ke Excel, 4 sheet.\n\n"
+   "Untuk pertanyaan 'mana saja'. Sheet DETAIL berisi semua order dengan filter "
+   "otomatis — untuk melihat yang kendala, filter kolom status = KENDALA."),
+ "rekap": ("Jumlah order per status, plus urutan kendala terbanyak.\n\n"
+   "Pandangan sekilas. Untuk detail pakai /export."),
+ "assign": ("Memindahkan satu klaster (sekitar 10 order) ke teknisi lain.\n\n"
+   "Contoh: /assign RPLONT-04D26E BUDI\n\n"
+   "Untuk penyeimbangan kecil. Bot memperingatkan kalau ada order yang sudah "
+   "melewati tahap minta tiket — tiket itu tetap tercatat atas nama perequest "
+   "aslinya, karena di grup TSEL tiket terikat ke orang."),
+ "pindahzona": ("Memindahkan seluruh zona, sekitar 8 klaster atau 80 order.\n\n"
+   "Contoh: /pindahzona Z14 BUDI\n\nUntuk teknisi resign atau mutasi."),
+ "nonaktif": ("Menghentikan distribusi pagi ke seorang teknisi.\n\n"
+   "Contoh: /nonaktif BUDI\n\n"
+   "Bot akan memberi tahu berapa order yang masih menggantung atas namanya. "
+   "Order itu TIDAK pindah otomatis — Anda tetap harus memindahkannya."),
+ "setkuota": ("Berapa order dikirim ke tiap teknisi tiap pagi. Sekarang bisa "
+   "dicek dengan mengetik /setkuota tanpa angka.\n\n"
+   "Terlalu kecil, teknisi kehabisan pekerjaan. Terlalu besar, daftarnya "
+   "tenggelam di chat dan malah tidak dikerjakan."),
+ "onboarding": ("Siapa saja yang belum menekan /start.\n\n"
+   "Selama nama masih ada di daftar ini, bot tidak bisa mengirim pesan apa pun "
+   "ke orang tersebut — Telegram melarang bot memulai percakapan duluan."),
+ "kolam": ("Klaster yang tidak ada pemiliknya, siap diambil teknisi lewat "
+   "/ambil.\n\n"
+   "Sekarang isinya nol karena semua klaster sudah terbagi ke 65 teknisi. "
+   "Kolam terisi kalau ada klaim kedaluwarsa, atau Anda sengaja melepas."),
+ "lepaspaksa": ("Mencabut klaster dari pemiliknya, kembalikan ke kolam.\n\n"
+   "Contoh: /lepaspaksa RPLONT-04D26E\n\n"
+   "Dipakai kalau teknisi menghilang dan Anda belum tahu harus dialihkan ke "
+   "siapa — biarkan siapa pun yang lewat mengambilnya."),
+ "dorong": ("Memaksa satu klaster muncul di puncak daftar /ambil semua "
+   "teknisi, dengan tanda bintang, mengabaikan batas jarak 3 km.\n\n"
+   "Contoh: /dorong RPLONT-04D26E\nBatalkan: /dorong RPLONT-04D26E off\n\n"
+   "Alat untuk wilayah pinggiran yang tidak ada yang mau."),
+}
+
+
 @admin_only
 async def cmd_adminhelp(update: Update, ctx):
+    if ctx.args:
+        k = ctx.args[0].lstrip("/").lower()
+        if k in BANTUAN_ADMIN:
+            return await update.message.reply_text(
+                f"<b>/{k}</b>\n\n{BANTUAN_ADMIN[k]}", parse_mode=ParseMode.HTML)
+        return await update.message.reply_text(
+            f"Tidak ada penjelasan untuk '{k}'. Ketik /adminhelp untuk daftarnya.")
     await update.message.reply_text(
-        "<b>Pantauan</b>\n"
-        "/progres — selesai vs total, laju, perkiraan sisa waktu\n"
-        "/hariini — aktivitas hari ini vs kemarin, siapa yang menutup\n"
-        "/rekap — funnel status + pareto kendala\n"
-        "/beban — sisa order per teknisi\n"
-        "/tunggutiket — order mandek menunggu tiket\n"
-        "/stagnan — klaster tanpa progres\n"
-        "/export — seluruh data ke Excel\n\n"
-        "<b>Penugasan</b>\n"
-        "/assign &lt;group_uid&gt; &lt;nama|nik&gt; — pindah satu klaster\n"
-        "/pindahzona &lt;zona&gt; &lt;nama|nik&gt; — pindah seluruh zona\n"
-        "/onboarding — siapa yang belum tekan /start\n"
-        "/setkuota &lt;n&gt; — kuota order per teknisi per hari\n"
-        "/nonaktif &lt;nama|nik&gt; — nonaktifkan teknisi\n\n"
-        "<b>Kolam klaim</b>\n"
+        "Ketik <code>/adminhelp namaperintah</code> untuk penjelasan lengkap "
+        "satu perintah. Contoh: <code>/adminhelp stagnan</code>\n\n"
+        "<b>Tiap hari</b>\n"
+        "/hariini — apa yang terjadi hari ini vs kemarin\n"
+        "/tunggutiket — order mandek menunggu tiket terbit\n\n"
+        "<b>Tiap minggu</b>\n"
+        "/progres — sejauh mana, dan perkiraan kapan selesai\n"
+        "/beban — sebaran beban dan siapa yang banyak kendala\n"
+        "/stagnan — klaster yang tidak bergerak seminggu\n"
+        "/export — semua data ke Excel untuk ditelusuri\n"
+        "/rekap — ringkasan status dan kendala\n\n"
+        "<b>Saat ada kejadian</b>\n"
+        "/assign — pindahkan 1 klaster ke teknisi lain\n"
+        "/pindahzona — pindahkan 1 zona penuh\n"
+        "/nonaktif — hentikan distribusi ke seorang teknisi\n"
+        "/setkuota — atur jatah order harian\n"
+        "/onboarding — siapa yang belum menekan /start\n\n"
+        "<b>Kolam pekerjaan bebas</b>\n"
         "/kolam — klaster tanpa pemilik\n"
-        "/dorong &lt;group_uid&gt; — paksa ke puncak daftar semua teknisi\n"
-        "/lepaspaksa &lt;group_uid&gt; — tarik klaster kembali ke kolam\n\n"
-        "<b>Lain-lain</b>\n"
-        "/cari &lt;no_inet&gt; · /struk &lt;no_inet&gt;",
+        "/lepaspaksa — cabut klaster, kembalikan ke kolam\n"
+        "/dorong — paksa 1 klaster ke puncak daftar semua teknisi\n\n"
+        "<b>Satuan</b>\n"
+        "/cari 1234567890 — buka satu order\n"
+        "/struk 1234567890 — cetak ulang bukti order selesai",
         parse_mode=ParseMode.HTML)
 
 
