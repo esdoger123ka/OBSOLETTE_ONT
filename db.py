@@ -78,6 +78,10 @@ async def tambah_teknisi(uid: int, nik: str, nama: str) -> str:
     return "diperbarui" if ada else "baru"
 
 
+async def set_sektor(uid: int, sektor):
+    await pool().execute("UPDATE teknisi SET sektor=$2 WHERE teknisi_id=$1", uid, sektor)
+
+
 async def aktifkan_teknisi(uid: int):
     await pool().execute("UPDATE teknisi SET aktif=TRUE WHERE teknisi_id=$1", uid)
 
