@@ -456,6 +456,35 @@ async def sisa_sekitar(group_uid: str, teknisi_id: int, kecuali: str) -> int:
         group_uid, teknisi_id, kecuali) or 0
 
 
+async def isi_klaster(group_uid: str):
+    return await pool().fetch(
+        """SELECT o.no_inet, o.odp, o.status, o.speed_mb, o.kode_kendala,
+                  o.followup_date, t.nama AS teknisi
+           FROM orders o
+           LEFT JOIN v_order_owner v ON v.no_inet = o.no_inet
+           LEFT JOIN teknisi t       ON t.teknisi_id = v.teknisi_id
+           WHERE o.group_uid = $1
+           ORDER BY o.odp, o.no_inet""", group_uid)
+
+
+async def info_klaster(group_uid: str):
+    return await pool().fetchrow(
+        """SELECT k.group_uid, k.odc, k.sektor, k.prioritas, k.lat, k.lon,
+                  k.terakhir_aktif, t.nama AS pemilik, a.claim_mode,
+                  EXTRACT(DAY FROM now()-k.terakhir_aktif)::INT AS diam_hari
+           FROM klaster k
+           LEFT JOIN assignment a ON a.group_uid = k.group_uid AND a.aktif
+           LEFT JOIN teknisi t    ON t.teknisi_id = a.teknisi_id
+           WHERE k.group_uid = $1""", group_uid)
+
+
+async def cari_klaster(q: str):
+    return await pool().fetch(
+        """SELECT group_uid FROM klaster
+           WHERE group_uid ILIKE '%'||$1||'%' OR odc ILIKE '%'||$1||'%'
+           ORDER BY group_uid LIMIT 12""", q)
+
+
 async def klaster_zona(zona: str):
     return await pool().fetch(
         "SELECT DISTINCT group_uid FROM orders WHERE zona=$1 ORDER BY group_uid", zona
