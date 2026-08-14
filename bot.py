@@ -127,7 +127,8 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
     lines.append(f"<b>ODP</b> {ringkas_odp(o['odp'])}")
     lines.append(
         f"<b>Wilayah</b> {'Sektor ' + str(o['sektor']) if o['sektor'] else 'luar RJW'}"
-        f" · {o['odc'] or '-'} · <code>{o['group_uid']}</code>")
+        f" · ODC {o['odc'] or '-'}")
+    lines.append(f"<b>Kode wilayah</b> <code>{o['group_uid']}</code>")
     if sekitar:
         lines.append(f"Di wilayah yang sama masih ada {sekitar} order Anda yang "
                      "belum selesai — biasanya jaraknya cuma beberapa ratus meter, "
@@ -138,6 +139,7 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
     if admin:
         lines.append("")
         lines.append("<b>Data sistem</b>")
+        lines.append(f"Kode wilayah : <code>{o['group_uid']}</code>")
         lines.append(f"Pemilik : {o['owner_nama'] or 'belum ada'}"
                      + ("  (override)" if o["teknisi_override"] else ""))
         lines.append(f"Status  : {o['status']}")
@@ -1222,7 +1224,18 @@ async def cmd_beban(update: Update, ctx):
 async def cmd_assign(update: Update, ctx):
     if len(ctx.args) < 2:
         return await update.message.reply_text("Format: /assign <group_uid> <nama|nik>")
-    gu, q = ctx.args[0], " ".join(ctx.args[1:])
+    gu, q = ctx.args[0].strip().upper(), " ".join(ctx.args[1:])
+    if not await db.klaster_ada(gu):
+        mirip = await db.cari_klaster(gu.replace("/", "-").rsplit("-", 1)[0])
+        pesan = f"Tidak ada wilayah berkode {gu}."
+        if "/" in ctx.args[0]:
+            pesan += ("\n\nYang Anda ketik itu kode ODP — pakai garis miring. "
+                      "Kode wilayah memakai tanda hubung, contoh RJW-FDX-10.")
+        if mirip:
+            pesan += "\n\nMungkin yang Anda maksud:\n" + "\n".join(
+                f"<code>{m['group_uid']}</code>" for m in mirip[:8])
+        pesan += "\n\nCek isinya dulu dengan /klaster sebelum memindahkan."
+        return await update.message.reply_text(pesan, parse_mode=ParseMode.HTML)
     cand = await db.cari_teknisi(q)
     if len(cand) != 1:
         pesan = ("Teknisi tidak ditemukan." if not cand
@@ -1231,8 +1244,15 @@ async def cmd_assign(update: Update, ctx):
     blok = await db.pool().fetch(
         """SELECT no_inet,status FROM orders WHERE group_uid=$1
            AND status NOT IN ('NEW','ASSIGNED','CARING_OK','KENDALA','CLOSED','BATAL')""", gu)
+    lama = await db.pool().fetchval(
+        """SELECT t.nama FROM assignment a JOIN teknisi t ON t.teknisi_id=a.teknisi_id
+           WHERE a.group_uid=$1 AND a.aktif""", gu)
+    n = await db.pool().fetchval(
+        """SELECT COUNT(*) FROM orders WHERE group_uid=$1
+           AND status NOT IN ('CLOSED','BATAL')""", gu)
     await db.set_assignment(gu, cand[0]["teknisi_id"], update.effective_user.id)
-    msg = f"Klaster {gu} → {cand[0]['nama']}."
+    msg = (f"Wilayah {gu} ({n} order belum selesai) "
+           f"{'dipindah dari ' + lama + ' ' if lama else ''}→ {cand[0]['nama']}.")
     if blok:
         msg += (f"\n\n⚠ {len(blok)} order sudah melewati tahap request tiket dan tetap "
                 "tercatat atas nama perequest asli: "
@@ -1302,6 +1322,14 @@ async def cmd_onboarding(update: Update, ctx):
     for r in rows:
         out.append(f"{r['nik']} · {r['nama']} · <code>{r['teknisi_id']}</code>")
     await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_perbaiki(update: Update, ctx):
+    n = await db.hapus_assignment_hantu()
+    await update.message.reply_text(
+        f"{n} penugasan yang menunjuk wilayah tidak ada telah dihapus."
+        if n else "Tidak ada penugasan bermasalah.")
 
 
 @admin_only
@@ -1784,6 +1812,7 @@ def main():
     app.add_handler(CommandHandler("setkuota", cmd_setkuota))
     app.add_handler(CommandHandler("nonaktif", cmd_nonaktif))
     app.add_handler(CommandHandler("kolam", cmd_kolam))
+    app.add_handler(CommandHandler("perbaiki", cmd_perbaiki))
     app.add_handler(CommandHandler("sektor", cmd_sektor))
     app.add_handler(CommandHandler("dorong", cmd_dorong))
     app.add_handler(CommandHandler("lepaspaksa", cmd_lepaspaksa))
