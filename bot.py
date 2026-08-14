@@ -246,7 +246,8 @@ async def cmd_bantuan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Perintah sehari-hari</b>\n"
         "/order — lihat order yang harus dikerjakan hari ini\n"
         "/sisa — berapa order Anda yang belum selesai\n"
-        "/cari 1234567890 — buka order tertentu dengan nomor layanannya\n\n"
+        "/cari 1234567890 — buka order tertentu dengan nomor layanannya\n"
+        "/klaster RJW-FCB-01 — lihat semua order dalam satu wilayah\n\n"
         "<b>Kalau order Anda habis</b>\n"
         "/ambil — kirim lokasi, bot tunjukkan pekerjaan terdekat yang belum "
         "ada yang pegang\n"
@@ -367,6 +368,79 @@ async def cmd_struk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(
             f"Order ini belum selesai (status: {config.LABEL.get(o['status'], o['status'])}).")
     await update.message.reply_text(await teks_struk(no_inet))
+
+
+async def cmd_klaster(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    t = await guard(update)
+    admin = await db.is_admin(uid)
+    if not t and not admin:
+        return await update.message.reply_text(
+            "Nomor Telegram Anda belum terdaftar. Ketik /start.")
+    if not ctx.args:
+        return await update.message.reply_text(
+            "Format: /klaster <kode wilayah>\n\n"
+            "Contoh:\n"
+            "/klaster RJW-FCB-01   (satu wilayah)\n"
+            "/klaster RJW-FCB      (cari semua wilayah di ODC itu)")
+
+    q = ctx.args[0].strip().upper()
+    info = await db.info_klaster(q)
+    if not info:
+        cocok = await db.cari_klaster(q)
+        if not cocok:
+            return await update.message.reply_text(
+                f"Tidak ada wilayah yang cocok dengan '{q}'.")
+        if len(cocok) == 1:
+            info = await db.info_klaster(cocok[0]["group_uid"])
+        else:
+            return await update.message.reply_text(
+                f"Ada {len(cocok)} wilayah yang cocok. Pilih salah satu:",
+                reply_markup=kb([[InlineKeyboardButton(
+                    c["group_uid"], callback_data=f"kls|{c['group_uid']}")]
+                    for c in cocok]))
+    await kirim_klaster(update.message, info, uid, admin)
+
+
+async def kirim_klaster(target, info, uid: int, admin: bool):
+    rows = await db.isi_klaster(info["group_uid"])
+    if not rows:
+        return await target.reply_text("Wilayah ini tidak punya order.")
+
+    milik_saya = any(r["teknisi"] and r["teknisi"] for r in rows)
+    pemilik = info["pemilik"] or "belum ada yang pegang"
+    sisa = sum(1 for r in rows if r["status"] not in ("CLOSED", "BATAL"))
+    selesai = sum(1 for r in rows if r["status"] == "CLOSED")
+
+    out = [f"<b>{info['group_uid']}</b>",
+           f"Sektor {info['sektor'] or '-'} · ODC {info['odc'] or 'luar RJW'}",
+           f"Dipegang: {pemilik}",
+           f"Selesai {selesai} dari {len(rows)} order, sisa {sisa}"]
+    if info["prioritas"]:
+        out.append("★ Didahulukan oleh Officer")
+    if admin and info["diam_hari"] is not None:
+        out.append(f"Tidak ada aktivitas {info['diam_hari']} hari")
+    out.append("")
+
+    odp_now = None
+    for r in rows:
+        o = ringkas_odp(r["odp"])
+        if o != odp_now:
+            out.append(f"<b>{o}</b>")
+            odp_now = o
+        if r["status"] == "CLOSED":
+            tag = "selesai"
+        elif r["status"] == "KENDALA":
+            tag = f"kendala {r['kode_kendala'] or ''}".strip()
+            if r["followup_date"]:
+                tag += f", ulangi {r['followup_date']:%d %b}"
+        else:
+            tag = f"langkah {LANGKAH.get(r['status'], (0, ''))[0]}/{TOTAL_LANGKAH}"
+        out.append(f"  {r['no_inet']} · {tag}")
+
+    if len(rows) > 30:
+        out = out[:80] + ["", f"... dan {len(rows) - 30} order lainnya"]
+    await target.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 
 
 # ============================================================
@@ -496,6 +570,12 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if aksi == "list":
         return await kirim_daftar(q.message, uid, ctx)
+
+    if aksi == "kls":
+        info = await db.info_klaster(arg)
+        if not info:
+            return await q.message.reply_text("Wilayah tidak ditemukan.")
+        return await kirim_klaster(q.message, info, uid, await db.is_admin(uid))
 
     if aksi == "klaim":
         return await do_klaim(q, ctx, arg, uid)
@@ -1503,6 +1583,7 @@ MENU_TEKNISI = [
     BotCommand("ambil",     "Ambil wilayah baru kalau order sudah habis"),
     BotCommand("klaimsaya", "Wilayah yang sedang saya pegang"),
     BotCommand("cari",      "Buka order tertentu pakai nomor layanan"),
+    BotCommand("klaster",   "Lihat semua order dalam satu wilayah"),
     BotCommand("struk",     "Cetak ulang bukti order yang sudah selesai"),
     BotCommand("batal",     "Batalkan pengisian yang sedang berjalan"),
     BotCommand("bantuan",   "Cara memakai bot ini"),
@@ -1535,6 +1616,7 @@ def main():
     app.add_handler(CommandHandler("sisa", cmd_sisa))
     app.add_handler(CommandHandler("cari", cmd_cari))
     app.add_handler(CommandHandler("struk", cmd_struk))
+    app.add_handler(CommandHandler("klaster", cmd_klaster))
     app.add_handler(CommandHandler("ambil", cmd_ambil))
     app.add_handler(CommandHandler("klaimsaya", cmd_klaimsaya))
 
