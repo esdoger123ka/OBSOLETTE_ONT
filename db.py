@@ -131,7 +131,8 @@ async def antrian(uid: int, limit: int) -> List[asyncpg.Record]:
     lalu yang sudah jalan, lalu klaster dengan sisa terbanyak."""
     return await pool().fetch(
         """SELECT o.no_inet, o.group_uid, o.zona, o.status, o.speed_mb,
-                  o.type_old, o.vendor_old, o.lat, o.lon, o.followup_date, o.flag
+                  o.type_old, o.vendor_old, o.lat, o.lon, o.followup_date, o.flag,
+                  o.odp, o.odc, o.sektor
            FROM orders o
            JOIN v_order_owner v ON v.no_inet=o.no_inet
            WHERE v.teknisi_id=$1
@@ -149,7 +150,7 @@ async def antrian(uid: int, limit: int) -> List[asyncpg.Record]:
                WHEN 'CARING_OK'  THEN 5
                WHEN 'KENDALA'    THEN 6
                ELSE 7 END,
-             o.group_uid, o.no_inet
+             o.odc, o.odp, o.no_inet
            LIMIT $2""",
         uid, limit,
     )
