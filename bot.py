@@ -91,6 +91,10 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
 
     lines.append("")
     lines.append("<b>Data pelanggan</b>")
+    if o["nama_plg"]:
+        lines.append(f"Nama      : {o['nama_plg']}")
+    if o["cp_plg"]:
+        lines.append(f"No HP     : {o['cp_plg']}")
     lines.append(f"ODP       : {ringkas_odp(o['odp'])}")
     lines.append(f"Kecepatan : {o['speed_mb']} Mbps")
     lines.append(f"ONT lama  : {o['type_old'] or '-'}")
@@ -160,6 +164,7 @@ async def teks_struk(no_inet: str) -> str:
     """Struk penyelesaian, siap di-forward atau diarsipkan."""
     r = await db.pool().fetchrow(
         """SELECT o.no_inet, o.sn_old, o.sn_new, o.status, o.type_old,
+                  o.nama_plg, o.cp_plg, o.odp,
                   t.no_tiket, k.nama AS teknisi,
                   to_char(o.closed_at AT TIME ZONE 'Asia/Jakarta',
                           'DD/MM/YYYY HH24:MI') AS selesai
@@ -175,6 +180,9 @@ async def teks_struk(no_inet: str) -> str:
             f"SN LAMA : {r['sn_old'] or '-'}\n"
             f"SN BARU : {r['sn_new'] or '-'}\n"
             f"ONT LAMA : {r['type_old'] or '-'}\n"
+            f"NAMA PELANGGAN : {r['nama_plg'] or '-'}\n"
+            f"CP PELANGGAN : {r['cp_plg'] or '-'}\n"
+            f"DATEK ODP : {ringkas_odp(r['odp'])}\n"
             f"TEKNISI : {r['teknisi'] or '-'}\n"
             f"SELESAI : {r['selesai'] or '-'}\n"
             f"STATUS : {r['status']}")
@@ -443,6 +451,83 @@ async def kirim_klaster(target, info, uid: int, admin: bool):
     await target.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 
 
+async def cmd_idgrup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    c = update.effective_chat
+    if c.type == "private":
+        return await update.message.reply_text(
+            "Perintah ini dipakai di dalam grup, bukan di chat pribadi.\n\n"
+            "Buat grup arsip, masukkan bot ini, jadikan admin, lalu ketik "
+            "/idgrup di grup tersebut.")
+    if not await db.is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        f"ID grup ini: <code>{c.id}</code>\n\n"
+        "Salin, lalu di chat pribadi dengan bot ketik:\n"
+        f"<code>/setarsip {c.id}</code>",
+        parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_setarsip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        kini = await db.get_setting("grup_arsip", "")
+        return await update.message.reply_text(
+            f"Grup arsip saat ini: {kini or 'belum diatur'}\n\n"
+            "Cara mengatur:\n"
+            "1. Buat grup Telegram baru\n"
+            "2. Masukkan bot ini ke grup, jadikan admin\n"
+            "3. Ketik /idgrup di grup tersebut\n"
+            "4. Kembali ke sini, ketik /setarsip <id yang didapat>\n\n"
+            "Matikan dengan: /setarsip off")
+    v = ctx.args[0].strip()
+    if v.lower() in ("off", "0", "mati", "-"):
+        await db.set_setting("grup_arsip", "", update.effective_user.id)
+        return await update.message.reply_text("Pengiriman ke grup arsip dimatikan.")
+    try:
+        chat_id = int(v)
+    except ValueError:
+        return await update.message.reply_text(
+            "ID grup harus berupa angka, biasanya diawali tanda minus. "
+            "Ambil dengan /idgrup di dalam grupnya.")
+    try:
+        await ctx.bot.send_message(
+            chat_id, "Grup ini disetel sebagai arsip order ONT yang sudah selesai.")
+    except Exception as e:
+        return await update.message.reply_text(
+            f"Bot tidak bisa mengirim ke grup itu: {e}\n\n"
+            "Pastikan bot sudah dimasukkan ke grup dan dijadikan admin.")
+    await db.set_setting("grup_arsip", str(chat_id), update.effective_user.id)
+    await update.message.reply_text(
+        "Tersimpan. Mulai sekarang tiap order yang ditutup akan dikirim ke grup "
+        "itu beserta kedua fotonya.")
+
+
+async def kirim_arsip(ctx, no_inet: str):
+    """Kirim struk + 2 foto ke grup arsip. Kegagalan tidak boleh
+    mengganggu penutupan order, jadi semua error ditelan dan dicatat."""
+    try:
+        gid = await db.get_setting("grup_arsip", "")
+        if not gid:
+            return
+        o = await db.pool().fetchrow(
+            """SELECT foto_label_sn, foto_terpasang FROM orders WHERE no_inet=$1""",
+            no_inet)
+        teks = await teks_struk(no_inet)
+        foto = [f for f in (o["foto_label_sn"], o["foto_terpasang"]) if f]
+        if len(foto) == 2:
+            from telegram import InputMediaPhoto
+            await ctx.bot.send_media_group(
+                int(gid),
+                [InputMediaPhoto(foto[0], caption=teks),
+                 InputMediaPhoto(foto[1])])
+        elif foto:
+            await ctx.bot.send_photo(int(gid), foto[0], caption=teks)
+        else:
+            await ctx.bot.send_message(int(gid), teks)
+    except Exception as e:
+        log.warning("gagal kirim arsip %s: %s", no_inet, e)
+
+
 # ============================================================
 # klaim mandiri
 # ============================================================
@@ -562,6 +647,35 @@ async def cmd_klaimsaya(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # aksi per order
 # ============================================================
 
+async def lanjut_caring(msg, no_inet: str, uid: int):
+    """Catat caring selesai lalu tampilkan teks request tiket yang sudah lengkap."""
+    o = await db.get_order(no_inet)
+    await db.transisi(no_inet, "CARING_OK", uid,
+                      extra_sql=(", caring_at=now(), kode_kendala=NULL, "
+                                 "catatan_kendala=NULL, followup_date=NULL"))
+    link = await db.get_setting("link_grup_tsel", "")
+    teks = ("Bagus. <b>Langkah 2 dari 6</b>\n\n"
+            "Salin teks di bawah ini dan kirim ke grup TSEL. Semua datanya "
+            "sudah lengkap, tidak perlu diubah.")
+    if link and link != "https://t.me/":
+        teks += f"\n\nGrup: {link}"
+    await msg.reply_text(teks, parse_mode=ParseMode.HTML)
+    await msg.reply_text(
+        f"No Internet : {o['no_inet']}\n"
+        f"Nama Pelanggan : {o['nama_plg']}\n"
+        f"CP Pelanggan : {o['cp_plg']}\n"
+        "Witel : BANDUNG\n"
+        "STO : RJW\n"
+        "Request : Tiket Symptom Z_PERMINTAAN_044 untuk penggantian ONT")
+    await msg.reply_text(
+        "Kalau sudah terkirim di grup, tekan tombol di bawah.",
+        reply_markup=kb([
+            [InlineKeyboardButton("✅ Sudah saya kirim di grup TSEL",
+                                  callback_data=f"reqtiket|{no_inet}")],
+            [InlineKeyboardButton("✏️ Nama/CP salah, perbaiki",
+                                  callback_data=f"ubahplg|{no_inet}")]]))
+
+
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -621,28 +735,18 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ---- caring OK ----
     if aksi == "caring":
-        await db.transisi(arg, "CARING_OK", uid,
-                          extra_sql=", caring_at=now(), kode_kendala=NULL, catatan_kendala=NULL, followup_date=NULL")
-        link = await db.get_setting("link_grup_tsel", "")
-        teks = (
-            "Bagus. <b>Langkah 2 dari 6</b>\n\n"
-            "Sekarang minta tiket di grup TSEL. Salin teks di bawah, lengkapi "
-            "<b>Nama Pelanggan</b> dan <b>CP Pelanggan</b> dari aplikasi yang biasa "
-            "Anda pakai, lalu kirim ke grup.\n\n"
-            f"<code>No Internet : {o['no_inet']}\n"
-            "Nama Pelanggan : \n"
-            "CP Pelanggan : \n"
-            "Witel : BANDUNG\n"
-            "STO : RJW\n"
-            "Request : Tiket Symptom Z_PERMINTAAN_044 untuk penggantian ONT</code>\n\n"
-            "Kalau sudah terkirim di grup, tekan tombol di bawah."
-        )
-        if link and link != "https://t.me/":
-            teks += f"\n\nGrup: {link}"
-        return await q.message.reply_text(
-            teks, parse_mode=ParseMode.HTML,
-            reply_markup=kb([[InlineKeyboardButton("✅ Sudah saya kirim di grup TSEL",
-                                                   callback_data=f"reqtiket|{arg}")]]))
+        if not (o["nama_plg"] and o["cp_plg"]):
+            ctx.user_data["pending"] = ("nama_plg", arg)
+            return await q.message.reply_text(
+                "Sebelum minta tiket, bot perlu nama pelanggannya.\n\n"
+                "Ketik nama pelanggan sesuai data pelanggan yang Anda buka. "
+                "Nanti bot yang merangkai teks requestnya, jadi Anda tinggal "
+                "salin dan kirim ke grup.\n\nBatal? Ketik /batal.")
+        return await lanjut_caring(q.message, arg, uid)
+
+    if aksi == "ubahplg":
+        ctx.user_data["pending"] = ("nama_plg", arg)
+        return await q.message.reply_text("Ketik ulang nama pelanggannya.")
 
     # ---- tandai sudah request tiket ----
     if aksi == "reqtiket":
@@ -749,6 +853,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.pool().execute(
             "UPDATE tickets SET closed_at=now() WHERE no_inet=$1", arg)
         await q.message.reply_text(await teks_struk(arg))
+        await kirim_arsip(ctx, arg)
         return await q.message.reply_text(
             "Order selesai. Terima kasih.\n\n"
             "Simpan bukti di atas — kalau nanti ada yang menanyakan, "
@@ -784,6 +889,35 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     teks = update.message.text.strip()
     jenis = p[0]
+
+    # ---- nama pelanggan ----
+    if jenis == "nama_plg":
+        no_inet = p[1]
+        if len(teks) < 3:
+            return await update.message.reply_text(
+                "Nama terlalu pendek. Ketik nama pelanggan selengkapnya, "
+                "atau /batal.")
+        await db.pool().execute(
+            "UPDATE orders SET nama_plg=$2, updated_at=now() WHERE no_inet=$1",
+            no_inet, teks.upper())
+        ctx.user_data["pending"] = ("cp_plg", no_inet)
+        return await update.message.reply_text(
+            "Sekarang ketik nomor HP pelanggannya.\n"
+            "Contoh: 081380874793")
+
+    # ---- CP pelanggan ----
+    if jenis == "cp_plg":
+        no_inet = p[1]
+        cp = re.sub(r"[^0-9+]", "", teks)
+        if len(re.sub(r"\D", "", cp)) < 9:
+            return await update.message.reply_text(
+                f"\"{teks}\" tidak terlihat seperti nomor HP. "
+                "Ketik ulang angkanya saja, atau /batal.")
+        await db.pool().execute(
+            "UPDATE orders SET cp_plg=$2, updated_at=now() WHERE no_inet=$1",
+            no_inet, cp)
+        ctx.user_data.pop("pending")
+        return await lanjut_caring(update.message, no_inet, uid)
 
     # ---- nomor tiket ----
     if jenis == "tiket":
@@ -992,6 +1126,13 @@ BANTUAN_ADMIN = {
    "Nomor Telegram-nya didapat dari orangnya sendiri: suruh dia kirim /start "
    "ke bot ini, bot akan membalas dengan nomornya. Setelah terdaftar, dia "
    "belum punya pekerjaan — beri lewat /assign atau /pindahzona."),
+ "setarsip": ("Mengatur grup Telegram penampung bukti order selesai.\n\n"
+   "Tiap order yang ditutup dikirim ke grup itu berisi struk dan dua fotonya, "
+   "jadi Anda bisa memeriksa hasil kerja tanpa menghubungi teknisi.\n\n"
+   "Caranya: buat grup, masukkan bot, jadikan admin, ketik /idgrup di grup itu, "
+   "lalu /setarsip <id> di sini. Matikan dengan /setarsip off.\n\n"
+   "Kalau pengiriman gagal, order tetap tertutup normal — kegagalan arsip "
+   "tidak pernah menghambat teknisi."),
  "setsektor": ("Mengubah sektor seorang teknisi.\n\n"
    "Format: /setsektor <nama|nik> <1|2|3|bebas>\n"
    "Contoh: /setsektor AHMAD RIZAL 1\n\n"
@@ -1047,6 +1188,7 @@ async def cmd_adminhelp(update: Update, ctx):
         "<b>Kelola pengguna</b>\n"
         "/tambahteknisi — daftarkan teknisi baru\n"
         "/setsektor — ubah sektor teknisi\n"
+        "/setarsip — grup penampung bukti order selesai\n"
         "/aktifkan — aktifkan kembali teknisi nonaktif\n"
         "/tambahadmin — beri akses admin\n"
         "/hapusadmin — cabut akses admin\n"
@@ -1617,6 +1759,8 @@ def main():
     app.add_handler(CommandHandler("cari", cmd_cari))
     app.add_handler(CommandHandler("struk", cmd_struk))
     app.add_handler(CommandHandler("klaster", cmd_klaster))
+    app.add_handler(CommandHandler("idgrup", cmd_idgrup))
+    app.add_handler(CommandHandler("setarsip", cmd_setarsip))
     app.add_handler(CommandHandler("ambil", cmd_ambil))
     app.add_handler(CommandHandler("klaimsaya", cmd_klaimsaya))
 
