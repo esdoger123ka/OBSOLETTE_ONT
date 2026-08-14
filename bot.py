@@ -1091,6 +1091,13 @@ BANTUAN_ADMIN = {
    "Yang dicari bukan angka sisa — awalnya semua sekitar 80. Yang dicari nama "
    "dengan angka kendala jauh di atas rata-rata. Tanda ⚠ berarti orang itu "
    "belum menekan /start, jadi bot belum bisa mengirim apa pun kepadanya."),
+ "teknisi": ("Melihat pekerjaan satu orang.\n\n"
+   "Format: /teknisi <nama|nik>\n"
+   "Contoh: /teknisi CECEP\n\n"
+   "Menampilkan wilayah yang dipegangnya, berapa selesai, berapa kendala, dan "
+   "apakah wilayah itu hasil penugasan awal atau diambil sendiri lewat /ambil.\n\n"
+   "Tambahkan kata 'detail' untuk melihat daftar nomor layanannya:\n"
+   "/teknisi CECEP detail"),
  "stagnan": ("Klaster yang tidak ada progres sama sekali selama 7 hari.\n\n"
    "Pengaman terhadap teknisi yang berhenti bekerja tanpa memberi tahu — cuti, "
    "sakit, resign. Tanpa ini, 80 order bisa diam sebulan tanpa ketahuan."),
@@ -1181,6 +1188,7 @@ async def cmd_adminhelp(update: Update, ctx):
         "<b>Tiap minggu</b>\n"
         "/progres — sejauh mana, dan perkiraan kapan selesai\n"
         "/beban — sebaran beban dan siapa yang banyak kendala\n"
+        "/teknisi &lt;nama&gt; — wilayah dan order satu teknisi\n"
         "/stagnan — klaster yang tidak bergerak seminggu\n"
         "/export — semua data ke Excel untuk ditelusuri\n"
         "/rekap — ringkasan status dan kendala\n\n"
@@ -1330,6 +1338,72 @@ async def cmd_perbaiki(update: Update, ctx):
     await update.message.reply_text(
         f"{n} penugasan yang menunjuk wilayah tidak ada telah dihapus."
         if n else "Tidak ada penugasan bermasalah.")
+
+
+@admin_only
+async def cmd_teknisi(update: Update, ctx):
+    if not ctx.args:
+        return await update.message.reply_text(
+            "Format: /teknisi <nama|nik>\n\n"
+            "Contoh: /teknisi CECEP\n\n"
+            "Menampilkan wilayah yang dipegang orang itu beserta progresnya. "
+            "Tambahkan kata 'detail' di akhir untuk melihat daftar ordernya:\n"
+            "/teknisi CECEP detail")
+    args = list(ctx.args)
+    detail = args and args[-1].lower() in ("detail", "rinci", "order")
+    if detail:
+        args.pop()
+    cand = await db.cari_teknisi(" ".join(args))
+    if len(cand) != 1:
+        return await update.message.reply_text(
+            "Teknisi tidak ditemukan." if not cand
+            else "Nama tidak unik: " + ", ".join(c["nama"] for c in cand))
+    t = cand[0]
+    info = await db.get_teknisi(t["teknisi_id"])
+    kl = await db.pegangan_teknisi(t["teknisi_id"])
+
+    peran = f"Sektor {info['sektor']}" if info["sektor"] else "bebas (semua sektor)"
+    siap = "sudah" if info["onboarded_at"] else "BELUM tekan /start"
+    out = [f"<b>{t['nama']}</b> · {t['nik']}",
+           f"Peran: {peran} · {siap}"]
+    if not kl:
+        out.append("\nBelum memegang wilayah apa pun.")
+        return await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+    tot = sum(k["total"] for k in kl)
+    sisa = sum(k["sisa"] for k in kl)
+    kdl = sum(k["kendala"] for k in kl)
+    out.append(f"{len(kl)} wilayah · {tot - sisa} selesai dari {tot} · "
+               f"sisa {sisa} · kendala {kdl}\n")
+
+    for k in kl:
+        asal = "klaim sendiri" if k["claim_mode"] == "self" else "penugasan"
+        if k["ada_override"] and not k["claim_mode"]:
+            asal = "dikunci manual"
+        out.append(f"<code>{k['group_uid']}</code> · S{k['sektor'] or '-'} · "
+                   f"{asal}\n  {k['selesai']}/{k['total']} selesai · "
+                   f"sisa {k['sisa']}"
+                   + (f" · kendala {k['kendala']}" if k["kendala"] else ""))
+
+    if detail:
+        rows = await db.order_teknisi(t["teknisi_id"])
+        out.append(f"\n<b>Order belum selesai ({len(rows)})</b>")
+        gu = None
+        for r in rows[:60]:
+            if r["group_uid"] != gu:
+                out.append(f"<code>{r['group_uid']}</code>")
+                gu = r["group_uid"]
+            tag = (f"kendala {r['kode_kendala']}" if r["status"] == "KENDALA"
+                   else f"L{LANGKAH.get(r['status'], (0, ''))[0]}")
+            out.append(f"  {ringkas_odp(r['odp'])} · {r['no_inet']} · {tag}")
+        if len(rows) > 60:
+            out.append(f"... dan {len(rows) - 60} lainnya. Pakai /export untuk semuanya.")
+    else:
+        out.append("\nTambahkan 'detail' untuk melihat daftar ordernya.")
+
+    teks = "\n".join(out)
+    for i in range(0, len(teks), 3800):
+        await update.message.reply_text(teks[i:i + 3800], parse_mode=ParseMode.HTML)
 
 
 @admin_only
@@ -1797,6 +1871,7 @@ def main():
 
     app.add_handler(CommandHandler("adminhelp", cmd_adminhelp))
     app.add_handler(CommandHandler("beban", cmd_beban))
+    app.add_handler(CommandHandler("teknisi", cmd_teknisi))
     app.add_handler(CommandHandler("assign", cmd_assign))
     app.add_handler(CommandHandler("pindahzona", cmd_pindahzona))
     app.add_handler(CommandHandler("stagnan", cmd_stagnan))
