@@ -912,6 +912,12 @@ BANTUAN_ADMIN = {
    "Nomor Telegram-nya didapat dari orangnya sendiri: suruh dia kirim /start "
    "ke bot ini, bot akan membalas dengan nomornya. Setelah terdaftar, dia "
    "belum punya pekerjaan — beri lewat /assign atau /pindahzona."),
+ "setsektor": ("Mengubah sektor seorang teknisi.\n\n"
+   "Format: /setsektor <nama|nik> <1|2|3|bebas>\n"
+   "Contoh: /setsektor AHMAD RIZAL 1\n\n"
+   "Teknisi sektor hanya melihat wilayah sektornya di /ambil, sampai sisa "
+   "sektornya turun di bawah 50 order. Teknisi bebas melihat semua sektor, "
+   "dengan sektor paling tertinggal muncul lebih dulu."),
  "tambahadmin": ("Memberi akses admin ke seseorang.\n\n"
    "Format: /tambahadmin <nomor_telegram> <nama>\n\n"
    "Admin bisa memakai semua perintah pemantauan dan penugasan, termasuk "
@@ -960,6 +966,7 @@ async def cmd_adminhelp(update: Update, ctx):
         "/onboarding — siapa yang belum menekan /start\n\n"
         "<b>Kelola pengguna</b>\n"
         "/tambahteknisi — daftarkan teknisi baru\n"
+        "/setsektor — ubah sektor teknisi\n"
         "/aktifkan — aktifkan kembali teknisi nonaktif\n"
         "/tambahadmin — beri akses admin\n"
         "/hapusadmin — cabut akses admin\n"
@@ -1223,25 +1230,64 @@ async def cmd_export(update: Update, ctx):
 async def cmd_tambahteknisi(update: Update, ctx):
     if len(ctx.args) < 3 or not ctx.args[0].isdigit():
         return await update.message.reply_text(
-            "Format: /tambahteknisi <nomor_telegram> <nik> <nama lengkap>\n\n"
-            "Contoh:\n/tambahteknisi 473776150 18980067 AHMAD RIZAL\n\n"
+            "Format: /tambahteknisi <nomor_telegram> <nik> <nama> [sektor]\n\n"
+            "Contoh teknisi sektor 1:\n"
+            "/tambahteknisi 473776150 18980067 AHMAD RIZAL 1\n\n"
+            "Contoh teknisi bebas (tanpa angka sektor di akhir):\n"
+            "/tambahteknisi 473776150 18980067 AHMAD RIZAL\n\n"
             "Nomor Telegram didapat dari orangnya: suruh dia kirim /start ke bot "
             "ini, nanti bot membalas dengan nomornya.")
     uid, nik = int(ctx.args[0]), ctx.args[1]
-    nama = " ".join(ctx.args[2:]).upper()
+    sisa = list(ctx.args[2:])
+    sektor = None
+    if len(sisa) > 1 and sisa[-1] in ("1", "2", "3"):
+        sektor = int(sisa.pop())
+    nama = " ".join(sisa).upper()
     hasil = await db.tambah_teknisi(uid, nik, nama)
     if hasil == "nik_dipakai":
         return await update.message.reply_text(
             f"NIK {nik} sudah dipakai teknisi lain. Cek lagi NIK-nya.")
+    await db.set_sektor(uid, sektor)
+    peran = f"teknisi Sektor {sektor}" if sektor else "teknisi bebas (semua sektor)"
     if hasil == "diperbarui":
         return await update.message.reply_text(
-            f"Data {nama} diperbarui dan statusnya diaktifkan kembali.")
+            f"Data {nama} diperbarui sebagai {peran} dan diaktifkan kembali.")
     await update.message.reply_text(
-        f"{nama} ({nik}) terdaftar sebagai teknisi.\n\n"
+        f"{nama} ({nik}) terdaftar sebagai {peran}.\n\n"
         "Dua langkah lagi:\n"
         "1. Suruh dia kirim /start ke bot supaya bisa menerima pesan\n"
         "2. Beri dia pekerjaan — /assign atau /pindahzona, atau biarkan dia "
         "mengambil sendiri lewat /ambil kalau kolam ada isinya")
+
+
+@admin_only
+async def cmd_setsektor(update: Update, ctx):
+    if len(ctx.args) < 2:
+        return await update.message.reply_text(
+            "Format: /setsektor <nama|nik> <1|2|3|bebas>\n\n"
+            "Contoh:\n"
+            "/setsektor AHMAD RIZAL 1\n"
+            "/setsektor 18980067 bebas\n\n"
+            "Teknisi sektor hanya bisa mengambil wilayah di sektornya sampai "
+            "sektornya hampir habis. Teknisi bebas bisa ke sektor mana pun.")
+    nilai = ctx.args[-1].lower()
+    if nilai in ("1", "2", "3"):
+        sektor = int(nilai)
+    elif nilai in ("bebas", "0", "-", "none"):
+        sektor = None
+    else:
+        return await update.message.reply_text(
+            "Sektornya harus 1, 2, 3, atau kata 'bebas'.")
+    cand = await db.cari_teknisi(" ".join(ctx.args[:-1]))
+    if len(cand) != 1:
+        return await update.message.reply_text(
+            "Teknisi tidak ditemukan." if not cand
+            else "Nama tidak unik: " + ", ".join(c["nama"] for c in cand))
+    await db.set_sektor(cand[0]["teknisi_id"], sektor)
+    await update.message.reply_text(
+        f"{cand[0]['nama']} sekarang "
+        + (f"teknisi Sektor {sektor}." if sektor
+           else "teknisi bebas — bisa mengambil wilayah di sektor mana pun."))
 
 
 @admin_only
@@ -1502,6 +1548,7 @@ def main():
     app.add_handler(CommandHandler("onboarding", cmd_onboarding))
     app.add_handler(CommandHandler("tambahteknisi", cmd_tambahteknisi))
     app.add_handler(CommandHandler("aktifkan", cmd_aktifkan))
+    app.add_handler(CommandHandler("setsektor", cmd_setsektor))
     app.add_handler(CommandHandler("tambahadmin", cmd_tambahadmin))
     app.add_handler(CommandHandler("hapusadmin", cmd_hapusadmin))
     app.add_handler(CommandHandler("daftaradmin", cmd_daftaradmin))
