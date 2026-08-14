@@ -205,12 +205,54 @@ async def set_assignment(group_uid: str, teknisi_id: int, by: int, catatan: str 
 
 # ---------------- klaim mandiri (pull terkunci) ----------------
 
-async def kolam_terdekat(lat: float, lon: float, radius_km: float, limit: int = 8):
-    """Klaster tanpa pemilik, diurutkan: prioritas dulu, lalu jarak yang
-    sudah didiskon menurut lama diam."""
+async def sisa_sektor():
+    return await pool().fetch("SELECT * FROM v_sisa_sektor ORDER BY sektor")
+
+
+async def boleh_keluar_sektor(sektor: int) -> tuple:
+    """(boleh, sisa) — teknisi sektor boleh ambil di luar sektornya kalau
+    sisa di sektornya sendiri sudah di bawah ambang."""
+    ambang = int(await get_setting("ambang_keluar_sektor", "50"))
+    sisa = await pool().fetchval(
+        """SELECT COUNT(*) FROM orders
+           WHERE sektor=$1 AND status NOT IN ('CLOSED','BATAL')""", sektor) or 0
+    return sisa <= ambang, sisa
+
+
+async def luar_rjw_dibuka() -> bool:
+    ambang = int(await get_setting("ambang_buka_luar_rjw", "100"))
+    sisa = await pool().fetchval(
+        """SELECT COUNT(*) FROM orders
+           WHERE sektor IS NOT NULL AND status NOT IN ('CLOSED','BATAL')""") or 0
+    return sisa <= ambang
+
+
+async def kolam_terdekat(lat: float, lon: float, radius_km: float,
+                         limit: int = 8, sektor: int = None,
+                         kunci_sektor: bool = False):
+    """Klaster tanpa pemilik.
+
+    kunci_sektor=True  -> hanya klaster di sektor teknisi tersebut
+    kunci_sektor=False -> semua sektor, tapi yang paling tertinggal naik
+                          ke atas lewat bobot ketertinggalan
+    """
     diskon = float(await get_setting("diskon_umur_km_per_hari", "0.15"))
     maxhari = int(await get_setting("max_diskon_hari", "20"))
-    return await pool().fetch(
+    buka_luar = await luar_rjw_dibuka()
+
+    # sektor dengan sisa terbanyak dapat potongan jarak, supaya teknisi
+    # bebas terarah ke sana lebih dulu
+    bobot = {}
+    rows = await pool().fetch(
+        """SELECT sektor, COUNT(*) AS n FROM orders
+           WHERE sektor IS NOT NULL AND status NOT IN ('CLOSED','BATAL')
+           GROUP BY sektor""")
+    if rows:
+        maxn = max(r["n"] for r in rows) or 1
+        for r in rows:
+            bobot[r["sektor"]] = 2.0 * r["n"] / maxn   # 0..2 km potongan
+
+    hasil = await pool().fetch(
         """WITH j AS (
              SELECT v.*,
                     6371 * 2 * asin(sqrt(
@@ -219,15 +261,24 @@ async def kolam_terdekat(lat: float, lon: float, radius_km: float, limit: int = 
                       power(sin(radians(v.lon - $2) / 2), 2)
                     )) AS km
              FROM v_kolam v
+             WHERE ($7::int IS NULL OR NOT $8 OR v.sektor = $7)
+               AND (v.sektor IS NOT NULL OR $9)
            )
-           SELECT group_uid, zona, lat, lon, prioritas, sisa, diam_hari, km,
+           SELECT group_uid, zona, lat, lon, prioritas, sektor, odc,
+                  sisa, diam_hari, km,
                   km - ($5 * LEAST(diam_hari, $6)) AS skor
            FROM j
            WHERE km <= $3 OR prioritas
            ORDER BY prioritas DESC, skor ASC
            LIMIT $4""",
-        lat, lon, radius_km, limit, diskon, maxhari,
-    )
+        lat, lon, radius_km, limit * 3, diskon, maxhari,
+        sektor, kunci_sektor, buka_luar)
+
+    if kunci_sektor:
+        return hasil[:limit]
+    urut = sorted(hasil, key=lambda r: (not r["prioritas"],
+                                        r["skor"] - bobot.get(r["sektor"], 0)))
+    return urut[:limit]
 
 
 async def klaim_aktif(teknisi_id: int) -> tuple:
