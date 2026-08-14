@@ -467,8 +467,11 @@ async def cmd_idgrup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML)
 
 
-@admin_only
 async def cmd_setarsip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # pemeriksaan admin dilakukan di sini, bukan lewat dekorator, karena
+    # fungsi ini didefinisikan sebelum admin_only tersedia
+    if not await db.is_admin(update.effective_user.id):
+        return
     if not ctx.args:
         kini = await db.get_setting("grup_arsip", "")
         return await update.message.reply_text(
