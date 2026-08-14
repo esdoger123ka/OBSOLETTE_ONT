@@ -108,7 +108,9 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
         lines.append("\n⚠ Pelanggan ini punya lebih dari satu ONT.")
 
     lines.append("")
-    lines.append(f"<b>Wilayah</b> {o['zona']} · <code>{o['group_uid']}</code>")
+    lines.append(
+        f"<b>Wilayah</b> {'Sektor ' + str(o['sektor']) if o['sektor'] else 'luar RJW'}"
+        f" · {o['odc'] or '-'} · <code>{o['group_uid']}</code>")
     if sekitar:
         lines.append(f"Di wilayah yang sama masih ada {sekitar} order Anda yang "
                      "belum selesai — biasanya jaraknya cuma beberapa ratus meter, "
@@ -948,6 +950,7 @@ async def cmd_adminhelp(update: Update, ctx):
         "/hapusadmin — cabut akses admin\n"
         "/daftaradmin — siapa saja yang punya akses admin\n\n"
         "<b>Kolam pekerjaan bebas</b>\n"
+        "/sektor — sisa order per sektor\n"
         "/kolam — klaster tanpa pemilik\n"
         "/lepaspaksa — cabut klaster, kembalikan ke kolam\n"
         "/dorong — paksa 1 klaster ke puncak daftar semua teknisi\n\n"
@@ -1298,6 +1301,26 @@ async def cmd_aktifkan(update: Update, ctx):
 
 
 @admin_only
+async def cmd_sektor(update: Update, ctx):
+    rows = await db.sisa_sektor()
+    out = ["<b>Sisa order per sektor</b>", "<code>sisa   kdl  tek  per org</code>"]
+    for r in rows:
+        per = r["sisa"] / r["teknisi_sektor"] if r["teknisi_sektor"] else 0
+        out.append(f"<code>{r['sisa']:>4} {r['kendala']:>5} {r['teknisi_sektor']:>4}"
+                   f" {per:>7.0f}</code>  Sektor {r['sektor']}")
+    luar = await db.pool().fetchval(
+        """SELECT COUNT(*) FROM orders
+           WHERE sektor IS NULL AND status NOT IN ('CLOSED','BATAL')""")
+    dibuka = await db.luar_rjw_dibuka()
+    out.append(f"\nLuar RJW: {luar} order — "
+               + ("sudah dibuka" if dibuka else "belum dibuka, menunggu order RJW habis"))
+    out.append("\nKolom 'per org' hanya menghitung teknisi sektor. "
+               "37 teknisi bebas menyebar ke sektor mana pun, dan diarahkan "
+               "ke sektor dengan sisa terbanyak.")
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+@admin_only
 async def cmd_setkuota(update: Update, ctx):
     if not ctx.args or not ctx.args[0].isdigit():
         k = await db.get_setting("kuota_harian", "3")
@@ -1469,6 +1492,7 @@ def main():
     app.add_handler(CommandHandler("setkuota", cmd_setkuota))
     app.add_handler(CommandHandler("nonaktif", cmd_nonaktif))
     app.add_handler(CommandHandler("kolam", cmd_kolam))
+    app.add_handler(CommandHandler("sektor", cmd_sektor))
     app.add_handler(CommandHandler("dorong", cmd_dorong))
     app.add_handler(CommandHandler("lepaspaksa", cmd_lepaspaksa))
     app.add_handler(CommandHandler("hariini", cmd_hariini))
