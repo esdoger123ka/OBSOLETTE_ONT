@@ -491,6 +491,34 @@ async def hapus_assignment_hantu() -> int:
     return int(r.split()[-1])
 
 
+async def pegangan_teknisi(teknisi_id: int):
+    """Klaster yang dipegang seorang teknisi beserta progresnya."""
+    return await pool().fetch(
+        """SELECT v.group_uid, k.odc, k.sektor, a.claim_mode,
+                  COUNT(*)                                        AS total,
+                  COUNT(*) FILTER (WHERE v.status='CLOSED')       AS selesai,
+                  COUNT(*) FILTER (WHERE v.status='KENDALA')      AS kendala,
+                  COUNT(*) FILTER (WHERE v.status NOT IN ('CLOSED','BATAL')) AS sisa,
+                  bool_or(v.is_override)                          AS ada_override
+           FROM v_order_owner v
+           LEFT JOIN klaster k    ON k.group_uid = v.group_uid
+           LEFT JOIN assignment a ON a.group_uid = v.group_uid AND a.aktif
+           WHERE v.teknisi_id = $1
+           GROUP BY v.group_uid, k.odc, k.sektor, a.claim_mode
+           ORDER BY sisa DESC, v.group_uid""", teknisi_id)
+
+
+async def order_teknisi(teknisi_id: int, hanya_sisa: bool = True):
+    return await pool().fetch(
+        f"""SELECT o.no_inet, o.odp, o.group_uid, o.status, o.kode_kendala,
+                   o.followup_date
+            FROM orders o
+            JOIN v_order_owner v ON v.no_inet = o.no_inet
+            WHERE v.teknisi_id = $1
+              {"AND o.status NOT IN ('CLOSED','BATAL')" if hanya_sisa else ""}
+            ORDER BY o.group_uid, o.odp, o.no_inet""", teknisi_id)
+
+
 async def cari_klaster(q: str):
     return await pool().fetch(
         """SELECT group_uid FROM klaster
