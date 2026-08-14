@@ -478,6 +478,19 @@ async def info_klaster(group_uid: str):
            WHERE k.group_uid = $1""", group_uid)
 
 
+async def klaster_ada(group_uid: str) -> bool:
+    return bool(await pool().fetchval(
+        "SELECT 1 FROM klaster WHERE group_uid=$1", group_uid))
+
+
+async def hapus_assignment_hantu() -> int:
+    """Penugasan yang menunjuk klaster tidak ada. Sisa bug lama."""
+    r = await pool().execute(
+        """DELETE FROM assignment a
+           WHERE NOT EXISTS (SELECT 1 FROM klaster k WHERE k.group_uid = a.group_uid)""")
+    return int(r.split()[-1])
+
+
 async def cari_klaster(q: str):
     return await pool().fetch(
         """SELECT group_uid FROM klaster
