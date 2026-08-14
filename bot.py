@@ -66,6 +66,17 @@ LANGKAH = {
 TOTAL_LANGKAH = 6
 
 
+def ringkas_odp(odp) -> str:
+    """'ODC-RJW-FDV/22' -> 'RJW-FDV/22'. Kosong -> '-'."""
+    if not odp:
+        return "-"
+    t = str(odp).strip()
+    for p in ("ODP-", "ODC-"):
+        if t.upper().startswith(p):
+            t = t[len(p):]
+    return t
+
+
 def kartu(o, admin: bool = False, sekitar: int = None) -> str:
     lines = [f"<b>No layanan {o['no_inet']}</b>"]
 
@@ -80,6 +91,7 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
 
     lines.append("")
     lines.append("<b>Data pelanggan</b>")
+    lines.append(f"ODP       : {ringkas_odp(o['odp'])}")
     lines.append(f"Kecepatan : {o['speed_mb']} Mbps")
     lines.append(f"ONT lama  : {o['type_old'] or '-'}")
     lines.append(f"SN lama   : <code>{o['sn_old'] or '-'}</code>")
@@ -108,6 +120,7 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
         lines.append("\n⚠ Pelanggan ini punya lebih dari satu ONT.")
 
     lines.append("")
+    lines.append(f"<b>ODP</b> {ringkas_odp(o['odp'])}")
     lines.append(
         f"<b>Wilayah</b> {'Sektor ' + str(o['sektor']) if o['sektor'] else 'luar RJW'}"
         f" · {o['odc'] or '-'} · <code>{o['group_uid']}</code>")
@@ -278,11 +291,13 @@ async def kirim_daftar(target, uid: int, ctx):
     for r in rows:
         no = LANGKAH.get(r["status"], (0, ""))[0]
         btn.append([InlineKeyboardButton(
-            f"{r['no_inet']} — langkah {no}/{TOTAL_LANGKAH}",
+            f"{ringkas_odp(r['odp'])} · {r['no_inet']} · L{no}",
             callback_data=f"open|{r['no_inet']}")])
     await target.reply_text(
-        f"Ini {len(rows)} order untuk hari ini. Sisa keseluruhan {total} order.\n"
-        "Tekan salah satu untuk mulai.", reply_markup=kb(btn))
+        f"Ini {len(rows)} order untuk hari ini. Sisa keseluruhan {total} order.\n\n"
+        "Urutannya sudah dikelompokkan per ODP, jadi yang berdekatan muncul "
+        "bersebelahan. L1–L6 menunjukkan sudah sampai langkah berapa.",
+        reply_markup=kb(btn))
 
 
 async def cmd_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1361,7 +1376,8 @@ async def job_distribusi(ctx: ContextTypes.DEFAULT_TYPE):
         if not ordr:
             continue
         btn = [[InlineKeyboardButton(
-            f"{r['no_inet']} — langkah {LANGKAH.get(r['status'], (0, ''))[0]}/{TOTAL_LANGKAH}",
+            f"{ringkas_odp(r['odp'])} · {r['no_inet']} · "
+            f"L{LANGKAH.get(r['status'], (0, ''))[0]}",
             callback_data=f"open|{r['no_inet']}")] for r in ordr]
         try:
             await ctx.bot.send_message(
