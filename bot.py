@@ -296,7 +296,7 @@ async def cmd_batal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def kirim_daftar(target, uid: int, ctx):
-    kuota = int(await db.get_setting("kuota_harian", "3"))
+    kuota = await db.kuota_teknisi(uid)
     rows = await db.antrian(uid, kuota)
     total = await db.pool().fetchval(
         """SELECT COUNT(*) FROM v_order_owner
@@ -1227,6 +1227,14 @@ BANTUAN_ADMIN = {
    "lalu /setarsip <id> di sini. Matikan dengan /setarsip off.\n\n"
    "Kalau pengiriman gagal, order tetap tertutup normal — kegagalan arsip "
    "tidak pernah menghambat teknisi."),
+ "setkuota": ("Mengatur berapa order ditampilkan sekaligus tiap hari.\n\n"
+   "Lihat pengaturan sekarang: /setkuota\n"
+   "Semua orang: /setkuota 5\n"
+   "Satu orang saja: /setkuota AHMAD RIZAL 8\n"
+   "Kembalikan ke umum: /setkuota AHMAD RIZAL normal\n\n"
+   "Ini hanya mengatur tampilan, bukan jumlah order yang dimiliki. Kuota "
+   "khusus berguna untuk teknisi yang jauh lebih cepat atau yang sedang "
+   "dibatasi bebannya."),
  "setsektor": ("Mengubah sektor seorang teknisi.\n\n"
    "Format: /setsektor <nama|nik> <1|2|3|bebas>\n"
    "Contoh: /setsektor AHMAD RIZAL 1\n\n"
@@ -1879,11 +1887,54 @@ async def cmd_sektor(update: Update, ctx):
 
 @admin_only
 async def cmd_setkuota(update: Update, ctx):
-    if not ctx.args or not ctx.args[0].isdigit():
-        k = await db.get_setting("kuota_harian", "3")
-        return await update.message.reply_text(f"Kuota saat ini: {k}. Ubah: /setkuota <n>")
-    await db.set_setting("kuota_harian", ctx.args[0], update.effective_user.id)
-    await update.message.reply_text(f"Kuota harian → {ctx.args[0]} order per teknisi.")
+    umum = await db.get_setting("kuota_harian", "3")
+    khusus = await db.kuota_khusus()
+
+    if not ctx.args:
+        out = [f"Kuota umum: <b>{umum}</b> order per teknisi per hari.", ""]
+        if khusus:
+            out.append("<b>Yang dikhususkan</b>")
+            for k in khusus:
+                out.append(f"{k['nama']} · {k['kuota_harian']}")
+            out.append("")
+        out += ["Ubah semua orang: <code>/setkuota 5</code>",
+                "Ubah satu orang: <code>/setkuota AHMAD RIZAL 8</code>",
+                "Kembalikan ke umum: <code>/setkuota AHMAD RIZAL normal</code>"]
+        return await update.message.reply_text("\n".join(out),
+                                               parse_mode=ParseMode.HTML)
+
+    # /setkuota <angka> -> kuota umum
+    if len(ctx.args) == 1 and ctx.args[0].isdigit():
+        n = int(ctx.args[0])
+        if not 1 <= n <= 100:
+            return await update.message.reply_text("Kuota harus antara 1 dan 100.")
+        await db.set_setting("kuota_harian", str(n), update.effective_user.id)
+        return await update.message.reply_text(
+            f"Kuota umum → {n} order per teknisi per hari.\n\n"
+            + (f"Tidak berlaku untuk {len(khusus)} orang yang dikhususkan. "
+               "Lihat dengan /setkuota tanpa angka." if khusus else ""))
+
+    # /setkuota <nama> <angka|normal>
+    nilai = ctx.args[-1].lower()
+    cand = await db.cari_teknisi(" ".join(ctx.args[:-1]))
+    if len(cand) != 1:
+        return await update.message.reply_text(
+            "Teknisi tidak ditemukan." if not cand
+            else "Nama tidak unik: " + ", ".join(c["nama"] for c in cand))
+    t = cand[0]
+
+    if nilai in ("normal", "umum", "hapus", "-"):
+        await db.set_kuota_teknisi(t["teknisi_id"], None)
+        return await update.message.reply_text(
+            f"{t['nama']} kembali ikut kuota umum ({umum} order per hari).")
+    if not nilai.isdigit() or not 1 <= int(nilai) <= 100:
+        return await update.message.reply_text(
+            "Kuotanya harus angka 1 sampai 100, atau kata 'normal' untuk "
+            "mengembalikan ke kuota umum.")
+    await db.set_kuota_teknisi(t["teknisi_id"], int(nilai))
+    await update.message.reply_text(
+        f"{t['nama']} → {nilai} order per hari, terpisah dari kuota umum "
+        f"({umum}).")
 
 
 @admin_only
@@ -1910,11 +1961,10 @@ async def cmd_nonaktif(update: Update, ctx):
 
 async def job_distribusi(ctx: ContextTypes.DEFAULT_TYPE):
     """Push antrian pagi ke tiap teknisi yang sudah onboarding."""
-    kuota = int(await db.get_setting("kuota_harian", "3"))
     rows = await db.pool().fetch(
         "SELECT teknisi_id, nama FROM teknisi WHERE aktif AND onboarded_at IS NOT NULL")
     for t in rows:
-        ordr = await db.antrian(t["teknisi_id"], kuota)
+        ordr = await db.antrian(t["teknisi_id"], await db.kuota_teknisi(t["teknisi_id"]))
         if not ordr:
             continue
         btn = [[InlineKeyboardButton(
