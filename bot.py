@@ -25,8 +25,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("botont")
 
 HEX16 = re.compile(r"^[0-9A-Fa-f]{16}$")
-TIKET_INSERA = re.compile(r"^INC\d{8}$", re.I)
-TIKET_DSC = re.compile(r"^1-[0-9A-Z]{6,10}$", re.I)
+TIKET_INSERA = re.compile(r"\bINC[\s-]?(\d{8})\b", re.I)
+# 1-XXXXXXX. Huruf I dan l sering tertukar dengan angka 1 di layar HP,
+# dan tanda hubung kadang jadi en dash saat disalin.
+TIKET_DSC = re.compile(r"(?:^|\s)[1Il][\s]?[-–—][\s]?([0-9A-Z]{6,10})\b", re.I)
+
+
+def baca_tiket(teks: str):
+    """Ambil nomor INSERA dan DSC dari teks bebas. Keduanya opsional."""
+    t = teks.upper()
+    ins = TIKET_INSERA.search(t)
+    dsc = TIKET_DSC.search(t)
+    return ("INC" + ins.group(1) if ins else None,
+            "1-" + dsc.group(1) if dsc else None)
 
 
 # ============================================================
@@ -150,13 +161,14 @@ def kartu(o, admin: bool = False, sekitar: int = None) -> str:
 async def teks_request_config(no_inet: str) -> str:
     """Format request config yang siap di-forward ke helpdesk."""
     r = await db.pool().fetchrow(
-        """SELECT o.no_inet, o.sn_old, o.sn_new, t.no_tiket
+        """SELECT o.no_inet, o.sn_old, o.sn_new, t.no_insera, t.no_dsc
            FROM orders o LEFT JOIN tickets t ON t.no_inet = o.no_inet
            WHERE o.no_inet = $1""", no_inet)
     if not r:
         return None
     return ("#request\n"
-            f"NO TIKET : {r['no_tiket'] or '-'}\n"
+            f"TIKET INSERA : {r['no_insera'] or '-'}\n"
+            f"TIKET DSC : {r['no_dsc'] or '-'}\n"
             f"NO LAYANAN : {r['no_inet']}\n"
             f"SN LAMA : {r['sn_old'] or '-'}\n"
             f"SN BARU : {r['sn_new'] or '-'}")
@@ -167,7 +179,7 @@ async def teks_struk(no_inet: str) -> str:
     r = await db.pool().fetchrow(
         """SELECT o.no_inet, o.sn_old, o.sn_new, o.status, o.type_old,
                   o.nama_plg, o.cp_plg, o.odp, o.jenis_tagih,
-                  t.no_tiket, k.nama AS teknisi,
+                  t.no_insera, t.no_dsc, k.nama AS teknisi,
                   to_char(o.closed_at AT TIME ZONE 'Asia/Jakarta',
                           'DD/MM/YYYY HH24:MI') AS selesai
            FROM orders o
@@ -177,7 +189,8 @@ async def teks_struk(no_inet: str) -> str:
     if not r:
         return None
     return ("#selesai\n"
-            f"NO TIKET : {r['no_tiket'] or '-'}\n"
+            f"TIKET INSERA : {r['no_insera'] or '-'}\n"
+            f"TIKET DSC : {r['no_dsc'] or '-'}\n"
             f"NO LAYANAN : {r['no_inet']}\n"
             f"SN LAMA : {r['sn_old'] or '-'}\n"
             f"SN BARU : {r['sn_new'] or '-'}\n"
@@ -685,6 +698,9 @@ async def lanjut_caring(msg, no_inet: str, uid: int):
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    if q.message and q.message.chat.type != "private":
+        return await q.message.reply_text(
+            "Tombol ini hanya bisa dipakai di chat pribadi dengan bot.")
     aksi, _, arg = q.data.partition("|")
     uid = q.from_user.id
 
@@ -777,12 +793,21 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ---- minta input teks ----
     if aksi == "tiket":
         ctx.user_data["pending"] = ("tiket", arg)
-        return await q.message.reply_text(
-            "Ketik nomor tiket yang diterbitkan admin grup.\n\n"
-            "Contoh yang benar:\n"
-            "INC51892061  (tiket INSERA)\n"
-            "1-S9Y14GE  (tiket DSC)\n\n"
-            "Salin persis seperti yang tertulis di grup. Batal? Ketik /batal.")
+        t = await db.pool().fetchrow(
+            "SELECT no_insera, no_dsc FROM tickets WHERE no_inet=$1", arg)
+        punya = []
+        if t and t["no_insera"]:
+            punya.append(f"INSERA {t['no_insera']}")
+        if t and t["no_dsc"]:
+            punya.append(f"DSC {t['no_dsc']}")
+        pesan = "Ketik nomor tiket yang diterbitkan admin grup.\n\n"
+        if punya:
+            pesan += "Sudah tercatat: " + ", ".join(punya) + "\nTinggal kirim sisanya.\n\n"
+        pesan += ("Kalau ada dua, kirim sekaligus dalam satu pesan:\n"
+                  "INC52107598 1-SEIBGGF\n\n"
+                  "Boleh juga satu-satu, atau dipisah baris.\n\n"
+                  "Batal? Ketik /batal.")
+        return await q.message.reply_text(pesan)
 
     if aksi == "sn":
         ctx.user_data["pending"] = ("sn", arg)
@@ -940,37 +965,70 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ---- nomor tiket ----
     if jenis == "tiket":
         no_inet = p[1]
-        val = teks.upper().replace(" ", "")
-        if TIKET_INSERA.match(val):
-            tipe = "INSERA"
-        elif TIKET_DSC.match(val):
-            tipe = "DSC"
-        else:
+        ins, dsc = baca_tiket(teks)
+        if not ins and not dsc:
             return await update.message.reply_text(
-                f"Nomor \"{teks}\" belum sesuai format tiket.\n\n"
-                "Tiket INSERA: huruf INC diikuti 8 angka, contoh INC51892061\n"
-                "Tiket DSC: angka 1, tanda hubung, lalu 6-10 huruf/angka, "
-                "contoh 1-S9Y14GE\n\n"
-                "Coba salin ulang dari grup, atau ketik /batal.")
-        dupe = await db.pool().fetchval(
-            "SELECT no_inet FROM tickets WHERE no_tiket=$1 AND no_inet<>$2", val, no_inet)
-        if dupe:
-            return await update.message.reply_text(
-                f"Nomor tiket ini sudah tercatat untuk order lain ({dupe}).\n\n"
-                "Kemungkinan tersalin dari pekerjaan sebelumnya. Cek lagi nomor "
-                "tiket untuk order ini di grup.")
+                f"Bot tidak menemukan nomor tiket yang sah di \"{teks}\".\n\n"
+                "Tiket INSERA: huruf INC lalu 8 angka — INC52107598\n"
+                "Tiket DSC: angka 1, tanda hubung, lalu 6-10 huruf/angka — "
+                "1-SEIBGGF\n\n"
+                "Yang sering keliru: huruf I diketik sebagai ganti angka 1 di "
+                "awal nomor DSC. Perhatikan di layar keduanya mirip.\n\n"
+                "Kirim ulang, atau ketik /batal.")
+
+        for nomor, kolom, label in ((ins, "no_insera", "INSERA"),
+                                    (dsc, "no_dsc", "DSC")):
+            if not nomor:
+                continue
+            dupe = await db.pool().fetchval(
+                f"SELECT no_inet FROM tickets WHERE {kolom}=$1 AND no_inet<>$2",
+                nomor, no_inet)
+            if dupe:
+                return await update.message.reply_text(
+                    f"Tiket {label} {nomor} sudah tercatat untuk order lain "
+                    f"({dupe}).\n\nKemungkinan tersalin dari pekerjaan "
+                    "sebelumnya. Cek lagi nomornya di grup.")
+
         o = await db.get_order(no_inet)
         await db.pool().execute(
-            """INSERT INTO tickets(no_inet,no_tiket,jenis,requested_by,requested_at)
-               VALUES($1,$2,$3,$4,$5)
+            """INSERT INTO tickets(no_inet,no_insera,no_dsc,no_tiket,jenis,
+                                   requested_by,requested_at)
+               VALUES($1,$2,$3,COALESCE($2,$3),
+                      CASE WHEN $2 IS NOT NULL THEN 'INSERA' ELSE 'DSC' END,$4,$5)
                ON CONFLICT (no_inet) DO UPDATE SET
-                 no_tiket=EXCLUDED.no_tiket, jenis=EXCLUDED.jenis, issued_at=now()""",
-            no_inet, val, tipe, uid, o["req_tiket_at"])
-        await db.transisi(no_inet, "TIKET_OPEN", uid, catatan=f"{tipe} {val}",
-                          extra_sql=", tiket_at=now()")
+                 no_insera = COALESCE(EXCLUDED.no_insera, tickets.no_insera),
+                 no_dsc    = COALESCE(EXCLUDED.no_dsc,    tickets.no_dsc),
+                 no_tiket  = COALESCE(EXCLUDED.no_insera, tickets.no_insera,
+                                      EXCLUDED.no_dsc,    tickets.no_dsc),
+                 issued_at = now()""",
+            no_inet, ins, dsc, uid, o["req_tiket_at"])
+
+        t = await db.pool().fetchrow(
+            "SELECT no_insera, no_dsc FROM tickets WHERE no_inet=$1", no_inet)
         ctx.user_data.pop("pending")
+
+        # Belum lengkap: catat yang ada, tawarkan melengkapi tanpa memaksa.
+        if not (t["no_insera"] and t["no_dsc"]):
+            ada = f"INSERA {t['no_insera']}" if t["no_insera"] else f"DSC {t['no_dsc']}"
+            kurang = "DSC" if t["no_insera"] else "INSERA"
+            await db.transisi(no_inet, "TIKET_OPEN", uid, catatan=ada,
+                              extra_sql=", tiket_at=COALESCE(tiket_at, now())")
+            return await update.message.reply_text(
+                f"{ada} tercatat. Nomor {kurang} belum ada.\n\n"
+                f"Kalau tiket {kurang} memang diterbitkan juga, tambahkan "
+                "sekarang. Kalau tidak ada, langsung lanjut ganti ONT.",
+                reply_markup=kb([
+                    [InlineKeyboardButton(f"📝 Tambah nomor {kurang}",
+                                          callback_data=f"tiket|{no_inet}")],
+                    [InlineKeyboardButton("📝 Lanjut, catat SN ONT baru",
+                                          callback_data=f"sn|{no_inet}")]]))
+
+        await db.transisi(no_inet, "TIKET_OPEN", uid,
+                          catatan=f"INSERA {t['no_insera']} · DSC {t['no_dsc']}",
+                          extra_sql=", tiket_at=COALESCE(tiket_at, now())")
         return await update.message.reply_text(
-            f"Tiket {tipe} {val} tercatat. <b>Langkah 4 dari 6</b>\n\n"
+            f"Kedua tiket tercatat.\nINSERA {t['no_insera']}\nDSC {t['no_dsc']}\n\n"
+            "<b>Langkah 4 dari 6</b>\n\n"
             "Silakan datangi lokasi dan ganti ONT-nya. Setelah terpasang dan "
             "internet menyala, kembali ke sini untuk mencatat SN perangkat baru "
             "dan mengirim 2 foto.",
@@ -1967,51 +2025,54 @@ def main():
            .post_shutdown(post_shutdown)
            .build())
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("bantuan", cmd_bantuan))
-    app.add_handler(CommandHandler("batal", cmd_batal))
-    app.add_handler(CommandHandler("order", cmd_order))
-    app.add_handler(CommandHandler("sisa", cmd_sisa))
-    app.add_handler(CommandHandler("cari", cmd_cari))
-    app.add_handler(CommandHandler("struk", cmd_struk))
-    app.add_handler(CommandHandler("klaster", cmd_klaster))
+    # Perintah hanya dilayani di chat pribadi. /idgrup sengaja dikecualikan
+    # karena memang harus dijalankan di dalam grup arsip.
+    japri = filters.ChatType.PRIVATE
+    app.add_handler(CommandHandler("start", cmd_start, filters=japri))
+    app.add_handler(CommandHandler("bantuan", cmd_bantuan, filters=japri))
+    app.add_handler(CommandHandler("batal", cmd_batal, filters=japri))
+    app.add_handler(CommandHandler("order", cmd_order, filters=japri))
+    app.add_handler(CommandHandler("sisa", cmd_sisa, filters=japri))
+    app.add_handler(CommandHandler("cari", cmd_cari, filters=japri))
+    app.add_handler(CommandHandler("struk", cmd_struk, filters=japri))
+    app.add_handler(CommandHandler("klaster", cmd_klaster, filters=japri))
     app.add_handler(CommandHandler("idgrup", cmd_idgrup))
-    app.add_handler(CommandHandler("setarsip", cmd_setarsip))
-    app.add_handler(CommandHandler("ambil", cmd_ambil))
-    app.add_handler(CommandHandler("klaimsaya", cmd_klaimsaya))
+    app.add_handler(CommandHandler("setarsip", cmd_setarsip, filters=japri))
+    app.add_handler(CommandHandler("ambil", cmd_ambil, filters=japri))
+    app.add_handler(CommandHandler("klaimsaya", cmd_klaimsaya, filters=japri))
 
-    app.add_handler(CommandHandler("adminhelp", cmd_adminhelp))
-    app.add_handler(CommandHandler("beban", cmd_beban))
-    app.add_handler(CommandHandler("teknisi", cmd_teknisi))
-    app.add_handler(CommandHandler("assign", cmd_assign))
-    app.add_handler(CommandHandler("pindahorder", cmd_pindahorder))
-    app.add_handler(CommandHandler("dikunci", cmd_dikunci))
-    app.add_handler(CommandHandler("pindahzona", cmd_pindahzona))
-    app.add_handler(CommandHandler("stagnan", cmd_stagnan))
-    app.add_handler(CommandHandler("rekap", cmd_rekap))
-    app.add_handler(CommandHandler("tunggutiket", cmd_tunggutiket))
-    app.add_handler(CommandHandler("onboarding", cmd_onboarding))
-    app.add_handler(CommandHandler("tambahteknisi", cmd_tambahteknisi))
-    app.add_handler(CommandHandler("aktifkan", cmd_aktifkan))
-    app.add_handler(CommandHandler("setsektor", cmd_setsektor))
-    app.add_handler(CommandHandler("tambahadmin", cmd_tambahadmin))
-    app.add_handler(CommandHandler("hapusadmin", cmd_hapusadmin))
-    app.add_handler(CommandHandler("daftaradmin", cmd_daftaradmin))
-    app.add_handler(CommandHandler("setkuota", cmd_setkuota))
-    app.add_handler(CommandHandler("nonaktif", cmd_nonaktif))
-    app.add_handler(CommandHandler("kolam", cmd_kolam))
-    app.add_handler(CommandHandler("perbaiki", cmd_perbaiki))
-    app.add_handler(CommandHandler("sektor", cmd_sektor))
-    app.add_handler(CommandHandler("dorong", cmd_dorong))
-    app.add_handler(CommandHandler("lepaspaksa", cmd_lepaspaksa))
-    app.add_handler(CommandHandler("hariini", cmd_hariini))
-    app.add_handler(CommandHandler("progres", cmd_progres))
-    app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("adminhelp", cmd_adminhelp, filters=japri))
+    app.add_handler(CommandHandler("beban", cmd_beban, filters=japri))
+    app.add_handler(CommandHandler("teknisi", cmd_teknisi, filters=japri))
+    app.add_handler(CommandHandler("assign", cmd_assign, filters=japri))
+    app.add_handler(CommandHandler("pindahorder", cmd_pindahorder, filters=japri))
+    app.add_handler(CommandHandler("dikunci", cmd_dikunci, filters=japri))
+    app.add_handler(CommandHandler("pindahzona", cmd_pindahzona, filters=japri))
+    app.add_handler(CommandHandler("stagnan", cmd_stagnan, filters=japri))
+    app.add_handler(CommandHandler("rekap", cmd_rekap, filters=japri))
+    app.add_handler(CommandHandler("tunggutiket", cmd_tunggutiket, filters=japri))
+    app.add_handler(CommandHandler("onboarding", cmd_onboarding, filters=japri))
+    app.add_handler(CommandHandler("tambahteknisi", cmd_tambahteknisi, filters=japri))
+    app.add_handler(CommandHandler("aktifkan", cmd_aktifkan, filters=japri))
+    app.add_handler(CommandHandler("setsektor", cmd_setsektor, filters=japri))
+    app.add_handler(CommandHandler("tambahadmin", cmd_tambahadmin, filters=japri))
+    app.add_handler(CommandHandler("hapusadmin", cmd_hapusadmin, filters=japri))
+    app.add_handler(CommandHandler("daftaradmin", cmd_daftaradmin, filters=japri))
+    app.add_handler(CommandHandler("setkuota", cmd_setkuota, filters=japri))
+    app.add_handler(CommandHandler("nonaktif", cmd_nonaktif, filters=japri))
+    app.add_handler(CommandHandler("kolam", cmd_kolam, filters=japri))
+    app.add_handler(CommandHandler("perbaiki", cmd_perbaiki, filters=japri))
+    app.add_handler(CommandHandler("sektor", cmd_sektor, filters=japri))
+    app.add_handler(CommandHandler("dorong", cmd_dorong, filters=japri))
+    app.add_handler(CommandHandler("lepaspaksa", cmd_lepaspaksa, filters=japri))
+    app.add_handler(CommandHandler("hariini", cmd_hariini, filters=japri))
+    app.add_handler(CommandHandler("progres", cmd_progres, filters=japri))
+    app.add_handler(CommandHandler("export", cmd_export, filters=japri))
 
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.LOCATION, on_location))
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.LOCATION & japri, on_location))
+    app.add_handler(MessageHandler(filters.PHOTO & japri, on_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & japri, on_text))
 
     app.add_error_handler(on_error)
 
