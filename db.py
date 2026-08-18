@@ -78,6 +78,26 @@ async def tambah_teknisi(uid: int, nik: str, nama: str) -> str:
     return "diperbarui" if ada else "baru"
 
 
+async def kuota_teknisi(teknisi_id: int) -> int:
+    """Kuota khusus orang itu, atau kuota umum kalau tidak diatur."""
+    k = await pool().fetchval(
+        "SELECT kuota_harian FROM teknisi WHERE teknisi_id=$1", teknisi_id)
+    if k:
+        return k
+    return int(await get_setting("kuota_harian", "3"))
+
+
+async def set_kuota_teknisi(teknisi_id: int, kuota):
+    await pool().execute(
+        "UPDATE teknisi SET kuota_harian=$2 WHERE teknisi_id=$1", teknisi_id, kuota)
+
+
+async def kuota_khusus():
+    return await pool().fetch(
+        """SELECT nama, nik, kuota_harian FROM teknisi
+           WHERE aktif AND kuota_harian IS NOT NULL ORDER BY nama""")
+
+
 async def set_sektor(uid: int, sektor):
     await pool().execute("UPDATE teknisi SET sektor=$2 WHERE teknisi_id=$1", uid, sektor)
 
