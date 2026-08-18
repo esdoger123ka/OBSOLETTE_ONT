@@ -78,6 +78,45 @@ async def tambah_teknisi(uid: int, nik: str, nama: str) -> str:
     return "diperbarui" if ada else "baru"
 
 
+# ---------------- sesi pengisian ----------------
+# Disimpan di database, bukan memori, supaya tidak hilang saat bot restart.
+
+async def set_sesi(teknisi_id: int, jenis: str, no_inet: str = None,
+                   data1: str = None, data2: str = None):
+    await pool().execute(
+        """INSERT INTO sesi(teknisi_id,jenis,no_inet,data1,data2,ts)
+           VALUES($1,$2,$3,$4,$5,now())
+           ON CONFLICT (teknisi_id) DO UPDATE SET
+             jenis=EXCLUDED.jenis, no_inet=EXCLUDED.no_inet,
+             data1=EXCLUDED.data1, data2=EXCLUDED.data2, ts=now()""",
+        teknisi_id, jenis, no_inet, data1, data2)
+
+
+async def get_sesi(teknisi_id: int):
+    return await pool().fetchrow(
+        "SELECT jenis, no_inet, data1, data2 FROM sesi WHERE teknisi_id=$1",
+        teknisi_id)
+
+
+async def clear_sesi(teknisi_id: int) -> bool:
+    r = await pool().execute("DELETE FROM sesi WHERE teknisi_id=$1", teknisi_id)
+    return r.endswith("1")
+
+
+async def order_nunggu_foto(teknisi_id: int):
+    """Order milik teknisi yang SN-nya sudah dicatat tapi fotonya belum
+    lengkap. Dipakai sebagai cadangan kalau sesi hilang."""
+    return await pool().fetch(
+        """SELECT o.no_inet, o.foto_label_sn, o.foto_terpasang
+           FROM orders o
+           JOIN v_order_owner v ON v.no_inet = o.no_inet
+           WHERE v.teknisi_id = $1
+             AND o.sn_new IS NOT NULL
+             AND o.status NOT IN ('CLOSED','BATAL')
+             AND (o.foto_label_sn IS NULL OR o.foto_terpasang IS NULL)
+           ORDER BY o.updated_at DESC LIMIT 5""", teknisi_id)
+
+
 async def kuota_teknisi(teknisi_id: int) -> int:
     """Kuota khusus orang itu, atau kuota umum kalau tidak diatur."""
     k = await pool().fetchval(
