@@ -527,6 +527,25 @@ async def cari_klaster(q: str):
            ORDER BY group_uid LIMIT 12""", q)
 
 
+async def set_override(no_inet: str, teknisi_id):
+    await pool().execute(
+        "UPDATE orders SET teknisi_override=$2, updated_at=now() WHERE no_inet=$1",
+        no_inet, teknisi_id)
+
+
+async def daftar_override():
+    return await pool().fetch(
+        """SELECT o.no_inet, o.group_uid, o.status, t.nama AS dikunci_ke,
+                  a.teknisi_id AS pemilik_klaster, t2.nama AS nama_klaster
+           FROM orders o
+           JOIN teknisi t          ON t.teknisi_id = o.teknisi_override
+           LEFT JOIN assignment a  ON a.group_uid = o.group_uid AND a.aktif
+           LEFT JOIN teknisi t2    ON t2.teknisi_id = a.teknisi_id
+           WHERE o.teknisi_override IS NOT NULL
+             AND o.status NOT IN ('CLOSED','BATAL')
+           ORDER BY t.nama, o.no_inet""")
+
+
 async def rekap_tagih():
     return await pool().fetch("SELECT * FROM v_tagih ORDER BY teknisi")
 
