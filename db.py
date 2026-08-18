@@ -431,7 +431,7 @@ async def detail_export():
     return await pool().fetch(
         """SELECT o.no_inet, o.group_uid, o.zona, o.flag, o.status,
                   k.nama AS teknisi, o.speed_mb, o.vendor_old, o.type_old,
-                  o.sn_old, o.sn_new, t.no_tiket, t.jenis AS jenis_tiket,
+                  o.sn_old, o.sn_new, t.no_insera, t.no_dsc,
                   o.jenis_tagih, o.nama_plg, o.cp_plg, o.odp, o.odc, o.sektor,
                   o.kode_kendala, o.catatan_kendala, o.followup_date, o.percobaan,
                   to_char(o.caring_at    AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS caring,
