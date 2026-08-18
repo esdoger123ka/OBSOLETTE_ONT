@@ -284,7 +284,7 @@ async def cmd_bantuan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_batal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ada = ctx.user_data.pop("pending", None)
+    ada = await db.clear_sesi(update.effective_user.id)
     await update.message.reply_text(
         "Pengisian dibatalkan. Ketik /order untuk kembali ke daftar."
         if ada else
@@ -580,14 +580,15 @@ async def cmd_ambil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(
             [[KeyboardButton("Kirim lokasi saya", request_location=True)]],
             resize_keyboard=True, one_time_keyboard=True))
-    ctx.user_data["pending"] = ("lokasi_klaim",)
+    await db.set_sesi(update.effective_user.id, "lokasi_klaim")
 
 
 async def on_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    p = ctx.user_data.get("pending")
-    if not p or p[0] != "lokasi_klaim":
+    uid = update.effective_user.id
+    p = await db.get_sesi(uid)
+    if not p or p["jenis"] != "lokasi_klaim":
         return
-    ctx.user_data.pop("pending")
+    await db.clear_sesi(uid)
     loc = update.message.location
     live = getattr(loc, "live_period", None) is not None
     ctx.user_data["lokasi"] = (loc.latitude, loc.longitude, live)
@@ -762,7 +763,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ---- caring OK ----
     if aksi == "caring":
         if not (o["nama_plg"] and o["cp_plg"]):
-            ctx.user_data["pending"] = ("nama_plg", arg)
+            await db.set_sesi(uid, "nama_plg", arg)
             return await q.message.reply_text(
                 "Sebelum minta tiket, bot perlu nama pelanggannya.\n\n"
                 "Ketik nama pelanggan sesuai data pelanggan yang Anda buka. "
@@ -771,7 +772,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await lanjut_caring(q.message, arg, uid)
 
     if aksi == "ubahplg":
-        ctx.user_data["pending"] = ("nama_plg", arg)
+        await db.set_sesi(uid, "nama_plg", arg)
         return await q.message.reply_text("Ketik ulang nama pelanggannya.")
 
     # ---- tandai sudah request tiket ----
@@ -792,7 +793,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ---- minta input teks ----
     if aksi == "tiket":
-        ctx.user_data["pending"] = ("tiket", arg)
+        await db.set_sesi(uid, "tiket", arg)
         t = await db.pool().fetchrow(
             "SELECT no_insera, no_dsc FROM tickets WHERE no_inet=$1", arg)
         punya = []
@@ -810,7 +811,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await q.message.reply_text(pesan)
 
     if aksi == "sn":
-        ctx.user_data["pending"] = ("sn", arg)
+        await db.set_sesi(uid, "sn", arg)
         return await q.message.reply_text(
             "Ketik SN ONT <b>yang baru dipasang</b>.\n\n"
             "SN ada di stiker belakang atau bawah perangkat, 16 karakter, "
@@ -832,7 +833,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if ref is None:
             return await q.message.reply_text("Kode kendala tidak dikenali.")
         if ref["perlu_catatan"] or ref["perlu_tanggal"]:
-            ctx.user_data["pending"] = ("kendala", arg, kode_kendala, ref["perlu_tanggal"])
+            await db.set_sesi(uid, "kendala", arg, kode_kendala,
+                              "Y" if ref["perlu_tanggal"] else None)
             if ref["perlu_tanggal"]:
                 besok = (date.today() + timedelta(days=1)).isoformat()
                 minta = (f"Kapan pelanggan minta didatangi lagi?\n"
@@ -880,9 +882,11 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not (o["foto_label_sn"] and o["foto_terpasang"]):
             kurang = ("foto stiker SN" if not o["foto_label_sn"]
                       else "foto perangkat terpasang")
+            await db.set_sesi(uid, "foto_label" if not o["foto_label_sn"]
+                              else "foto_terpasang", arg)
             return await q.message.reply_text(
                 f"Order ini belum bisa ditutup karena {kurang} belum ada.\n\n"
-                "Kirim fotonya sekarang.")
+                "Kirim fotonya sekarang, langsung ke chat ini.")
         return await q.message.reply_text(
             "Terakhir: pekerjaan ini ditagihkan sebagai apa?",
             reply_markup=kb([
@@ -926,16 +930,16 @@ async def simpan_kendala(msg, no_inet, kode, uid, catatan, tgl):
 # ============================================================
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    p = ctx.user_data.get("pending")
+    uid = update.effective_user.id
+    p = await db.get_sesi(uid)
     if not p:
         return
-    uid = update.effective_user.id
     teks = update.message.text.strip()
-    jenis = p[0]
+    jenis = p["jenis"]
 
     # ---- nama pelanggan ----
     if jenis == "nama_plg":
-        no_inet = p[1]
+        no_inet = p["no_inet"]
         if len(teks) < 3:
             return await update.message.reply_text(
                 "Nama terlalu pendek. Ketik nama pelanggan selengkapnya, "
@@ -943,14 +947,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.pool().execute(
             "UPDATE orders SET nama_plg=$2, updated_at=now() WHERE no_inet=$1",
             no_inet, teks.upper())
-        ctx.user_data["pending"] = ("cp_plg", no_inet)
+        await db.set_sesi(uid, "cp_plg", no_inet)
         return await update.message.reply_text(
             "Sekarang ketik nomor HP pelanggannya.\n"
             "Contoh: 081380874793")
 
     # ---- CP pelanggan ----
     if jenis == "cp_plg":
-        no_inet = p[1]
+        no_inet = p["no_inet"]
         cp = re.sub(r"[^0-9+]", "", teks)
         if len(re.sub(r"\D", "", cp)) < 9:
             return await update.message.reply_text(
@@ -959,12 +963,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.pool().execute(
             "UPDATE orders SET cp_plg=$2, updated_at=now() WHERE no_inet=$1",
             no_inet, cp)
-        ctx.user_data.pop("pending")
+        await db.clear_sesi(uid)
         return await lanjut_caring(update.message, no_inet, uid)
 
     # ---- nomor tiket ----
     if jenis == "tiket":
-        no_inet = p[1]
+        no_inet = p["no_inet"]
         ins, dsc = baca_tiket(teks)
         if not ins and not dsc:
             return await update.message.reply_text(
@@ -1005,7 +1009,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         t = await db.pool().fetchrow(
             "SELECT no_insera, no_dsc FROM tickets WHERE no_inet=$1", no_inet)
-        ctx.user_data.pop("pending")
+        await db.clear_sesi(uid)
 
         # Belum lengkap: catat yang ada, tawarkan melengkapi tanpa memaksa.
         if not (t["no_insera"] and t["no_dsc"]):
@@ -1038,7 +1042,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ---- SN baru ----
     if jenis == "sn":
-        no_inet = p[1]
+        no_inet = p["no_inet"]
         sn = teks.upper().replace(" ", "").replace(":", "")
         o = await db.get_order(no_inet)
         if not HEX16.match(sn):
@@ -1072,7 +1076,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.transisi(no_inet, "GANTI_OK", uid, sn_new=sn,
                           extra_sql=", sn_new=$3, vendor_new=$4, ganti_at=now()",
                           extra_args=(sn, vendor))
-        ctx.user_data["pending"] = ("foto_label", no_inet)
+        await db.set_sesi(uid, "foto_label", no_inet)
         return await update.message.reply_text(
             f"SN {sn} ({vendor}) tercatat.\n\n"
             "Sekarang kirim <b>foto pertama</b>: stiker SN pada perangkat baru. "
@@ -1081,7 +1085,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ---- kendala dengan keterangan / tanggal ----
     if jenis == "kendala":
-        _, no_inet, kode, perlu_tgl = p
+        no_inet, kode = p["no_inet"], p["data1"]
+        perlu_tgl = p["data2"] == "Y"
         tgl = None
         catatan = teks
         if perlu_tgl:
@@ -1097,32 +1102,71 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "Tanggalnya sudah lewat atau hari ini. Isi tanggal setelah "
                     "hari ini, karena order ini akan dimunculkan lagi pada tanggal itu.")
             catatan = None
-        ctx.user_data.pop("pending")
+        await db.clear_sesi(uid)
         return await simpan_kendala(update.message, no_inet, kode, uid, catatan, tgl)
 
 
 async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    p = ctx.user_data.get("pending")
-    if not p or p[0] not in ("foto_label", "foto_terpasang"):
-        return
+    uid = update.effective_user.id
     fid = update.message.photo[-1].file_id
-    no_inet = p[1]
-    if p[0] == "foto_label":
+    p = await db.get_sesi(uid)
+    jenis = p["jenis"] if p else None
+    no_inet = p["no_inet"] if p else None
+
+    # Cadangan: sesi hilang (misalnya bot baru di-restart) tapi ada order
+    # yang jelas sedang menunggu foto. Jangan biarkan kiriman teknisi
+    # menghilang tanpa kabar.
+    if jenis not in ("foto_label", "foto_terpasang"):
+        nunggu = await db.order_nunggu_foto(uid)
+        if not nunggu:
+            return await update.message.reply_text(
+                "Bot menerima foto ini tapi belum tahu untuk order yang mana.\n\n"
+                "Buka ordernya dulu lewat /order, sampai bot meminta fotonya.")
+        if len(nunggu) > 1:
+            return await update.message.reply_text(
+                "Ada beberapa order Anda yang menunggu foto. Pilih dulu yang mana:",
+                reply_markup=kb([[InlineKeyboardButton(
+                    r["no_inet"], callback_data=f"open|{r['no_inet']}")]
+                    for r in nunggu]))
+        r = nunggu[0]
+        no_inet = r["no_inet"]
+        jenis = "foto_label" if not r["foto_label_sn"] else "foto_terpasang"
+
+    if jenis == "foto_label":
         await db.pool().execute(
             "UPDATE orders SET foto_label_sn=$2, updated_at=now() WHERE no_inet=$1",
             no_inet, fid)
-        ctx.user_data["pending"] = ("foto_terpasang", no_inet)
+        sisa = await db.pool().fetchval(
+            "SELECT foto_terpasang IS NULL FROM orders WHERE no_inet=$1", no_inet)
+        if sisa:
+            await db.set_sesi(uid, "foto_terpasang", no_inet)
+            return await update.message.reply_text(
+                f"Foto stiker SN untuk {no_inet} tersimpan.\n\n"
+                "Sekarang <b>foto kedua</b>: perangkat baru yang sudah terpasang "
+                "di lokasi pelanggan, lampunya menyala.",
+                parse_mode=ParseMode.HTML)
+    else:
+        await db.pool().execute(
+            "UPDATE orders SET foto_terpasang=$2, updated_at=now() WHERE no_inet=$1",
+            no_inet, fid)
+
+    o = await db.pool().fetchrow(
+        """SELECT foto_label_sn, foto_terpasang, status
+           FROM orders WHERE no_inet=$1""", no_inet)
+    if not o["foto_label_sn"]:
+        await db.set_sesi(uid, "foto_label", no_inet)
         return await update.message.reply_text(
-            "Foto pertama tersimpan.\n\n"
-            "Sekarang <b>foto kedua</b>: perangkat baru yang sudah terpasang di "
-            "lokasi pelanggan, lampunya menyala.",
+            f"Foto perangkat terpasang untuk {no_inet} tersimpan.\n\n"
+            "Yang belum ada tinggal <b>foto stiker SN</b>. Kirim sekarang.",
             parse_mode=ParseMode.HTML)
-    await db.pool().execute(
-        "UPDATE orders SET foto_terpasang=$2, updated_at=now() WHERE no_inet=$1",
-        no_inet, fid)
-    ctx.user_data.pop("pending")
-    teks = await teks_request_config(no_inet)
-    await update.message.reply_text(teks)
+
+    await db.clear_sesi(uid)
+    if o["status"] in ("CONFIG_OK", "REQ_CONFIG"):
+        return await update.message.reply_text(
+            f"Foto {no_inet} sudah lengkap. Silakan tutup ordernya.",
+            reply_markup=kb([[InlineKeyboardButton(
+                "🏁 Tutup order ini", callback_data=f"close|{no_inet}")]]))
+    await update.message.reply_text(await teks_request_config(no_inet))
     await update.message.reply_text(
         "Foto lengkap. <b>Langkah 5 dari 6</b>\n\n"
         "Teruskan pesan di atas ke helpdesk untuk minta config. Kalau sudah "
@@ -1984,6 +2028,15 @@ async def job_distribusi(ctx: ContextTypes.DEFAULT_TYPE):
             log.warning("gagal kirim ke %s: %s", t["teknisi_id"], e)
 
 
+async def job_bersih_sesi(ctx: ContextTypes.DEFAULT_TYPE):
+    """Sesi pengisian yang menggantung lebih dari sehari dihapus, supaya
+    kiriman berikutnya tidak masuk ke order yang salah."""
+    r = await db.pool().execute(
+        "DELETE FROM sesi WHERE ts < now() - make_interval(hours => 18)")
+    if not r.endswith(" 0"):
+        log.info("sesi basi dihapus: %s", r)
+
+
 async def job_expire(ctx: ContextTypes.DEFAULT_TYPE):
     """Lepas klaim mandiri yang lewat tenggat dan kembalikan ke kolam."""
     for r in await db.klaim_kedaluwarsa():
@@ -2130,6 +2183,8 @@ def main():
     tz = ZoneInfo(config.TZ)
     jq.run_daily(job_distribusi, time=datetime.strptime("07:30", "%H:%M").time().replace(tzinfo=tz))
     jq.run_repeating(job_sla, interval=timedelta(hours=2), first=timedelta(minutes=5))
+    jq.run_repeating(job_bersih_sesi, interval=timedelta(hours=6),
+                     first=timedelta(minutes=10))
     jq.run_daily(job_expire, time=datetime.strptime("06:00", "%H:%M").time().replace(tzinfo=tz))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
