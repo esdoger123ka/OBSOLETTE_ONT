@@ -432,6 +432,7 @@ async def detail_export():
         """SELECT o.no_inet, o.group_uid, o.zona, o.flag, o.status,
                   k.nama AS teknisi, o.speed_mb, o.vendor_old, o.type_old,
                   o.sn_old, o.sn_new, t.no_tiket, t.jenis AS jenis_tiket,
+                  o.jenis_tagih, o.nama_plg, o.cp_plg, o.odp, o.odc, o.sektor,
                   o.kode_kendala, o.catatan_kendala, o.followup_date, o.percobaan,
                   to_char(o.caring_at    AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS caring,
                   to_char(o.req_tiket_at AT TIME ZONE 'Asia/Jakarta','YYYY-MM-DD HH24:MI') AS req_tiket,
@@ -524,6 +525,10 @@ async def cari_klaster(q: str):
         """SELECT group_uid FROM klaster
            WHERE group_uid ILIKE '%'||$1||'%' OR odc ILIKE '%'||$1||'%'
            ORDER BY group_uid LIMIT 12""", q)
+
+
+async def rekap_tagih():
+    return await pool().fetch("SELECT * FROM v_tagih ORDER BY teknisi")
 
 
 async def klaster_zona(zona: str):
