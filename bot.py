@@ -166,7 +166,7 @@ async def teks_struk(no_inet: str) -> str:
     """Struk penyelesaian, siap di-forward atau diarsipkan."""
     r = await db.pool().fetchrow(
         """SELECT o.no_inet, o.sn_old, o.sn_new, o.status, o.type_old,
-                  o.nama_plg, o.cp_plg, o.odp,
+                  o.nama_plg, o.cp_plg, o.odp, o.jenis_tagih,
                   t.no_tiket, k.nama AS teknisi,
                   to_char(o.closed_at AT TIME ZONE 'Asia/Jakarta',
                           'DD/MM/YYYY HH24:MI') AS selesai
@@ -187,6 +187,7 @@ async def teks_struk(no_inet: str) -> str:
             f"DATEK ODP : {ringkas_odp(r['odp'])}\n"
             f"TEKNISI : {r['teknisi'] or '-'}\n"
             f"SELESAI : {r['selesai'] or '-'}\n"
+            f"TAGIHAN : {r['jenis_tagih'] or '-'}\n"
             f"STATUS : {r['status']}")
 
 
@@ -726,10 +727,14 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=aksi_untuk(o["status"], o["no_inet"]),
             disable_web_page_preview=True)
 
-    # kd membawa dua argumen: no_inet|kode
-    kode_kendala = None
+    # kd dan tagih membawa argumen kedua: no_inet|nilai
+    kode_kendala = jenis_tagih = None
     if aksi == "kd":
         arg, _, kode_kendala = arg.partition("|")
+    elif aksi == "tagih":
+        arg, _, jenis_tagih = arg.partition("|")
+        if jenis_tagih not in ("MANHOUR", "REKON"):
+            return await q.message.reply_text("Pilihan tidak dikenali.")
 
     o = await db.get_order(arg)
     if not o:
@@ -853,8 +858,16 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(
                 f"Order ini belum bisa ditutup karena {kurang} belum ada.\n\n"
                 "Kirim fotonya sekarang.")
-        await db.transisi(arg, "CLOSED", uid,
-                          extra_sql=", closed_at=now(), closed_by=$3", extra_args=(uid,))
+        return await q.message.reply_text(
+            "Terakhir: pekerjaan ini ditagihkan sebagai apa?",
+            reply_markup=kb([
+                [InlineKeyboardButton("💰 Manhour", callback_data=f"tagih|{arg}|MANHOUR")],
+                [InlineKeyboardButton("📋 Rekon", callback_data=f"tagih|{arg}|REKON")]]))
+
+    if aksi == "tagih":
+        await db.transisi(arg, "CLOSED", uid, catatan=f"tagih {jenis_tagih}",
+                          extra_sql=", closed_at=now(), closed_by=$3, jenis_tagih=$4",
+                          extra_args=(uid, jenis_tagih))
         await db.pool().execute(
             "UPDATE tickets SET closed_at=now() WHERE no_inet=$1", arg)
         await q.message.reply_text(await teks_struk(arg))
@@ -1494,7 +1507,7 @@ async def cmd_progres(update: Update, ctx):
     await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 
 
-def _bangun_workbook(rows, funnel, pareto, beban, tren) -> bytes:
+def _bangun_workbook(rows, funnel, pareto, beban, tren, tagih) -> bytes:
     """Blocking. Dipanggil lewat asyncio.to_thread supaya polling tidak berhenti."""
     wb = Workbook()
     ws = wb.active
@@ -1526,6 +1539,12 @@ def _bangun_workbook(rows, funnel, pareto, beban, tren) -> bytes:
     for r in tren:
         ws4.append([r["tgl"], r["n"]])
 
+    ws5 = wb.create_sheet("PENAGIHAN")
+    ws5.append(["Teknisi", "NIK", "Manhour", "Rekon", "Belum ditandai", "Total selesai"])
+    for r in tagih:
+        ws5.append([r["teknisi"], r["nik"], r["manhour"], r["rekon"],
+                    r["belum_ditandai"], r["total_closed"]])
+
     bio = io.BytesIO()
     wb.save(bio)
     return bio.getvalue()
@@ -1541,7 +1560,7 @@ async def cmd_export(update: Update, ctx):
         paket = await asyncio.to_thread(
             _bangun_workbook, rows,
             await db.funnel(), await db.pareto_kendala(),
-            await db.beban(), await db.tren_harian(30))
+            await db.beban(), await db.tren_harian(30), await db.rekap_tagih())
         nama = f"MONITORING_ONT_RJW_{datetime.now(ZoneInfo(config.TZ)):%Y%m%d_%H%M}.xlsx"
         await update.message.reply_document(
             document=io.BytesIO(paket), filename=nama,
