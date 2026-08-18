@@ -1124,6 +1124,17 @@ BANTUAN_ADMIN = {
    "Untuk penyeimbangan kecil. Bot memperingatkan kalau ada order yang sudah "
    "melewati tahap minta tiket — tiket itu tetap tercatat atas nama perequest "
    "aslinya, karena di grup TSEL tiket terikat ke orang."),
+ "pindahorder": ("Memindahkan SATU order saja, tanpa mengganggu wilayahnya.\n\n"
+   "Format: /pindahorder <no_layanan> <nama|nik>\n"
+   "Contoh: /pindahorder 131177179142 DIKI SODIKIN\n"
+   "Batalkan: /pindahorder 131177179142 batal\n\n"
+   "Pakai ini untuk pengecualian — pelanggan minta teknisi tertentu, atau akses "
+   "lokasi yang butuh orang khusus. Untuk penyeimbangan beban, /assign per "
+   "wilayah lebih baik karena menjaga kedekatan lokasi.\n\n"
+   "Lihat semua yang sedang dikunci dengan /dikunci."),
+ "dikunci": ("Daftar order yang dipindah satuan lewat /pindahorder.\n\n"
+   "Perlu diperiksa berkala — order yang dikunci tidak ikut berpindah kalau "
+   "wilayahnya nanti dialihkan, jadi bisa tertinggal tanpa ada yang sadar."),
  "pindahzona": ("Memindahkan seluruh zona, sekitar 8 klaster atau 80 order.\n\n"
    "Contoh: /pindahzona Z14 BUDI\n\nUntuk teknisi resign atau mutasi."),
  "nonaktif": ("Menghentikan distribusi pagi ke seorang teknisi.\n\n"
@@ -1206,7 +1217,9 @@ async def cmd_adminhelp(update: Update, ctx):
         "/export — semua data ke Excel untuk ditelusuri\n"
         "/rekap — ringkasan status dan kendala\n\n"
         "<b>Saat ada kejadian</b>\n"
-        "/assign — pindahkan 1 klaster ke teknisi lain\n"
+        "/assign — pindahkan 1 wilayah ke teknisi lain\n"
+        "/pindahorder — pindahkan 1 order saja\n"
+        "/dikunci — daftar order yang dipindah satuan\n"
         "/pindahzona — pindahkan 1 zona penuh\n"
         "/nonaktif — hentikan distribusi ke seorang teknisi\n"
         "/setkuota — atur jatah order harian\n"
@@ -1417,6 +1430,85 @@ async def cmd_teknisi(update: Update, ctx):
     teks = "\n".join(out)
     for i in range(0, len(teks), 3800):
         await update.message.reply_text(teks[i:i + 3800], parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def cmd_pindahorder(update: Update, ctx):
+    if len(ctx.args) < 2:
+        return await update.message.reply_text(
+            "Format: /pindahorder &lt;no_layanan&gt; &lt;nama|nik&gt;\n\n"
+            "Contoh:\n/pindahorder 131177179142 DIKI SODIKIN\n\n"
+            "Memindahkan <b>satu order saja</b>, wilayahnya tetap dipegang "
+            "pemilik lama. Untuk memindahkan seluruh wilayah, pakai /assign.\n\n"
+            "Batalkan dengan: /pindahorder &lt;no_layanan&gt; batal",
+            parse_mode=ParseMode.HTML)
+
+    no_inet = ctx.args[0].strip()
+    o = await db.get_order(no_inet)
+    if not o:
+        return await update.message.reply_text(
+            "Nomor layanan itu tidak ada di daftar penggantian ONT.")
+
+    if ctx.args[1].lower() in ("batal", "off", "hapus", "-"):
+        if not o["teknisi_override"]:
+            return await update.message.reply_text(
+                "Order ini memang tidak dikunci ke siapa pun.")
+        await db.set_override(no_inet, None)
+        balik = await db.get_order(no_inet)
+        return await update.message.reply_text(
+            f"Kunci dilepas. Order {no_inet} kembali mengikuti wilayahnya, "
+            f"sekarang dipegang {balik['owner_nama'] or 'belum ada siapa-siapa'}.")
+
+    if o["status"] in ("CLOSED", "BATAL"):
+        return await update.message.reply_text(
+            "Order ini sudah selesai, tidak perlu dipindah.")
+
+    cand = await db.cari_teknisi(" ".join(ctx.args[1:]))
+    if len(cand) != 1:
+        return await update.message.reply_text(
+            "Teknisi tidak ditemukan." if not cand
+            else "Nama tidak unik: " + ", ".join(c["nama"] for c in cand))
+    t = cand[0]
+    if o["owner_id"] == t["teknisi_id"]:
+        return await update.message.reply_text(
+            f"Order ini memang sudah dipegang {t['nama']}.")
+
+    info = await db.get_teknisi(t["teknisi_id"])
+    await db.set_override(no_inet, t["teknisi_id"])
+    await db.transisi(no_inet, o["status"] if o["status"] != "NEW" else "ASSIGNED",
+                      update.effective_user.id, role="admin",
+                      catatan=f"order dipindah ke {t['nama']}",
+                      extra_sql=", assigned_at=COALESCE(assigned_at, now())")
+
+    pesan = [f"Order {no_inet} sekarang dipegang {t['nama']}.",
+             f"Wilayah {o['group_uid']} tetap milik "
+             f"{o['owner_nama'] or 'belum ada siapa-siapa'}."]
+    if o["status"] not in ("NEW", "ASSIGNED"):
+        pesan.append(f"\n⚠ Order ini sudah jalan sampai "
+                     f"{config.LABEL.get(o['status'], o['status'])}. "
+                     "Kalau tiketnya sudah terbit, tiket itu tetap tercatat atas "
+                     "nama perequest aslinya.")
+    if o["sektor"] and info["sektor"] and o["sektor"] != info["sektor"]:
+        pesan.append(f"\n⚠ Order ini di Sektor {o['sektor']}, sedangkan "
+                     f"{t['nama']} teknisi Sektor {info['sektor']}.")
+    if not info["onboarded_at"]:
+        pesan.append(f"\n⚠ {t['nama']} belum menekan /start, jadi belum bisa "
+                     "menerima pesan dari bot.")
+    await update.message.reply_text("\n".join(pesan))
+
+
+@admin_only
+async def cmd_dikunci(update: Update, ctx):
+    rows = await db.daftar_override()
+    if not rows:
+        return await update.message.reply_text(
+            "Tidak ada order yang dikunci ke teknisi tertentu.")
+    out = [f"<b>Order dipindah satuan ({len(rows)})</b>", ""]
+    for r in rows:
+        out.append(f"{r['no_inet']} · {r['dikunci_ke']}")
+        out.append(f"  wilayah {r['group_uid']} milik {r['nama_klaster'] or '-'}")
+    out.append("\nLepas dengan: /pindahorder &lt;no_layanan&gt; batal")
+    await update.message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 
 
 @admin_only
@@ -1892,6 +1984,8 @@ def main():
     app.add_handler(CommandHandler("beban", cmd_beban))
     app.add_handler(CommandHandler("teknisi", cmd_teknisi))
     app.add_handler(CommandHandler("assign", cmd_assign))
+    app.add_handler(CommandHandler("pindahorder", cmd_pindahorder))
+    app.add_handler(CommandHandler("dikunci", cmd_dikunci))
     app.add_handler(CommandHandler("pindahzona", cmd_pindahzona))
     app.add_handler(CommandHandler("stagnan", cmd_stagnan))
     app.add_handler(CommandHandler("rekap", cmd_rekap))
