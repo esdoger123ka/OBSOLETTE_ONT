@@ -12,10 +12,20 @@ BOOTSTRAP_ADMINS = [
 ]
 
 # Prefix serial number per vendor (8 hex pertama).
+# Dua penulisan untuk SN yang sama:
+#   bentuk panjang  : 48575443 + 8 karakter  (16 hex, seperti di data DPMIGNTE)
+#   bentuk pendek   : HWTC + 8 karakter      (12 karakter, seperti di stiker)
+# 48575443 adalah kode heksadesimal dari huruf HWTC, begitu pula yang lain.
 SN_PREFIX = {
     "HUAWEI": "48575443",
     "ZTE": "5A544547",
     "FIBERHOME": "46485454",
+}
+
+SN_PREFIX_PENDEK = {
+    "HUAWEI": "HWTC",
+    "ZTE": "ZTEG",
+    "FIBERHOME": "FHTT",
 }
 
 # Urutan status yang sah. Index dipakai untuk mencegah mundur tanpa sengaja.
