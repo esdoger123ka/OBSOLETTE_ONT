@@ -25,6 +25,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("botont")
 
 HEX16 = re.compile(r"^[0-9A-Fa-f]{16}$")
+SN_PENDEK = re.compile(r"^(HWTC|ZTEG|FHTT)([0-9A-F]{8})$")
+
+
+def baca_sn(teks: str):
+    """Terima SN dalam bentuk panjang (16 hex) atau pendek (HWTC/ZTEG/FHTT
+    + 8 karakter), kembalikan (bentuk_panjang, vendor, bentuk_pendek).
+    Keduanya dinormalkan ke bentuk panjang supaya pemeriksaan duplikat
+    tetap bekerja lintas format."""
+    t = re.sub(r"[\s:_-]", "", teks).upper()
+
+    m = SN_PENDEK.match(t)
+    if m:
+        awalan, sisa = m.group(1), m.group(2)
+        vendor = next(v for v, p in config.SN_PREFIX_PENDEK.items() if p == awalan)
+        return awalan.encode().hex().upper() + sisa, vendor, t
+
+    if HEX16.match(t):
+        vendor = next((v for v, p in config.SN_PREFIX.items() if t.startswith(p)), None)
+        if vendor:
+            return t, vendor, config.SN_PREFIX_PENDEK[vendor] + t[8:]
+        return t, None, None
+
+    return None, None, None
 TIKET_INSERA = re.compile(r"\bINC[\s-]?(\d{8})\b", re.I)
 # 1-XXXXXXX. Huruf I dan l sering tertukar dengan angka 1 di layar HP,
 # dan tanda hubung kadang jadi en dash saat disalin.
@@ -814,8 +837,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.set_sesi(uid, "sn", arg)
         return await q.message.reply_text(
             "Ketik SN ONT <b>yang baru dipasang</b>.\n\n"
-            "SN ada di stiker belakang atau bawah perangkat, 16 karakter, "
-            "biasanya diawali huruf. Jangan ketik SN yang lama.\n\n"
+            "SN ada di stiker belakang atau bawah perangkat. Boleh ditulis "
+            "bentuk pendek seperti <code>ZTEGDE5E3359</code>, boleh juga bentuk "
+            "panjang seperti <code>5A544547DE5E3359</code> — keduanya sama.\n\n"
+            "Jangan ketik SN yang lama.\n"
             f"SN lama order ini: <code>{o['sn_old'] or 'tidak ada di data'}</code>\n\n"
             "Batal? Ketik /batal.",
             parse_mode=ParseMode.HTML)
@@ -1043,42 +1068,48 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ---- SN baru ----
     if jenis == "sn":
         no_inet = p["no_inet"]
-        sn = teks.upper().replace(" ", "").replace(":", "")
         o = await db.get_order(no_inet)
-        if not HEX16.match(sn):
+        sn, vendor, pendek = baca_sn(teks)
+
+        if not sn:
             return await update.message.reply_text(
-                f"SN yang Anda ketik ada {len(sn)} karakter, seharusnya tepat 16 "
-                "dan hanya berisi angka 0-9 dan huruf A sampai F.\n\n"
-                "Cek lagi stiker di perangkat. Hati-hati membedakan angka 0 dengan "
-                "huruf O, dan angka 1 dengan huruf I.\n\n"
-                "Ketik ulang, atau /batal.")
-        vendor = next((v for v, p8 in config.SN_PREFIX.items() if sn.startswith(p8)), None)
+                f"\"{teks}\" belum sesuai format SN.\n\n"
+                "Dua penulisan yang diterima:\n"
+                "ZTEGDE5E3359 — 4 huruf lalu 8 karakter\n"
+                "5A544547DE5E3359 — 16 karakter angka dan huruf A sampai F\n\n"
+                "Salin persis dari stiker perangkat. Hati-hati membedakan angka 0 "
+                "dengan huruf O, dan angka 1 dengan huruf I.\n\n"
+                "Kirim ulang, atau /batal.")
+
         if not vendor:
             return await update.message.reply_text(
                 "SN ini tidak dikenali sebagai perangkat HUAWEI, ZTE, maupun "
                 "FIBERHOME.\n\n"
-                "Biasanya karena ada karakter yang salah baca. Coba foto stikernya "
-                "lalu perbesar, dan ketik ulang.\n\n"
+                "Awalan yang dikenal: HWTC atau 48575443 untuk HUAWEI, "
+                "ZTEG atau 5A544547 untuk ZTE, FHTT atau 46485454 untuk "
+                "FIBERHOME.\n\n"
                 "Kalau perangkatnya memang merek lain, laporkan ke Officer RJW.")
+
         if o["sn_old"] and sn == o["sn_old"].upper():
             return await update.message.reply_text(
                 "SN ini sama persis dengan ONT yang lama.\n\n"
                 "Yang perlu dicatat adalah SN perangkat <b>baru</b> yang barusan "
                 "Anda pasang, bukan yang dicabut.",
                 parse_mode=ParseMode.HTML)
+
         dipakai = await db.sn_dipakai(sn, no_inet)
         if dipakai:
             return await update.message.reply_text(
                 f"SN ini sudah tercatat terpasang di pelanggan lain ({dipakai}).\n\n"
-                "Satu perangkat tidak bisa terpasang di dua tempat. Kemungkinan "
-                "tersalin dari pekerjaan sebelumnya — cek ulang stiker perangkat "
-                "yang baru saja Anda pasang.")
+                "Satu perangkat tidak bisa terpasang di dua tempat. Cek ulang "
+                "stiker perangkat yang baru saja Anda pasang.")
+
         await db.transisi(no_inet, "GANTI_OK", uid, sn_new=sn,
                           extra_sql=", sn_new=$3, vendor_new=$4, ganti_at=now()",
                           extra_args=(sn, vendor))
         await db.set_sesi(uid, "foto_label", no_inet)
         return await update.message.reply_text(
-            f"SN {sn} ({vendor}) tercatat.\n\n"
+            f"SN tercatat: <code>{pendek}</code> ({vendor})\n\n"
             "Sekarang kirim <b>foto pertama</b>: stiker SN pada perangkat baru. "
             "Pastikan tulisannya terbaca jelas.",
             parse_mode=ParseMode.HTML)
