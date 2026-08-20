@@ -30,22 +30,23 @@ SN_PENDEK = re.compile(r"^(HWTC|ZTEG|FHTT)([0-9A-F]{8})$")
 
 def baca_sn(teks: str):
     """Terima SN dalam bentuk panjang (16 hex) atau pendek (HWTC/ZTEG/FHTT
-    + 8 karakter), kembalikan (bentuk_panjang, vendor, bentuk_pendek).
-    Keduanya dinormalkan ke bentuk panjang supaya pemeriksaan duplikat
-    tetap bekerja lintas format."""
+    + 8 karakter), kembalikan (sn_asli, kanonik, vendor).
+
+    sn_asli : persis seperti diketik teknisi, hanya dirapikan spasi dan
+              dibesarkan hurufnya. Inilah yang disimpan dan ditampilkan.
+    kanonik : bentuk baku 16 karakter, dipakai diam-diam untuk memastikan
+              satu perangkat tidak tercatat dua kali dengan format berbeda."""
     t = re.sub(r"[\s:_-]", "", teks).upper()
 
     m = SN_PENDEK.match(t)
     if m:
         awalan, sisa = m.group(1), m.group(2)
         vendor = next(v for v, p in config.SN_PREFIX_PENDEK.items() if p == awalan)
-        return awalan.encode().hex().upper() + sisa, vendor, t
+        return t, awalan.encode().hex().upper() + sisa, vendor
 
     if HEX16.match(t):
         vendor = next((v for v, p in config.SN_PREFIX.items() if t.startswith(p)), None)
-        if vendor:
-            return t, vendor, config.SN_PREFIX_PENDEK[vendor] + t[8:]
-        return t, None, None
+        return t, t, vendor
 
     return None, None, None
 TIKET_INSERA = re.compile(r"\bINC[\s-]?(\d{8})\b", re.I)
@@ -1069,7 +1070,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if jenis == "sn":
         no_inet = p["no_inet"]
         o = await db.get_order(no_inet)
-        sn, vendor, pendek = baca_sn(teks)
+        sn, kanonik, vendor = baca_sn(teks)
 
         if not sn:
             return await update.message.reply_text(
@@ -1090,14 +1091,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "FIBERHOME.\n\n"
                 "Kalau perangkatnya memang merek lain, laporkan ke Officer RJW.")
 
-        if o["sn_old"] and sn == o["sn_old"].upper():
+        if o["sn_old"] and kanonik == o["sn_old"].upper():
             return await update.message.reply_text(
                 "SN ini sama persis dengan ONT yang lama.\n\n"
                 "Yang perlu dicatat adalah SN perangkat <b>baru</b> yang barusan "
                 "Anda pasang, bukan yang dicabut.",
                 parse_mode=ParseMode.HTML)
 
-        dipakai = await db.sn_dipakai(sn, no_inet)
+        dipakai = await db.sn_dipakai(kanonik, no_inet)
         if dipakai:
             return await update.message.reply_text(
                 f"SN ini sudah tercatat terpasang di pelanggan lain ({dipakai}).\n\n"
@@ -1105,11 +1106,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "stiker perangkat yang baru saja Anda pasang.")
 
         await db.transisi(no_inet, "GANTI_OK", uid, sn_new=sn,
-                          extra_sql=", sn_new=$3, vendor_new=$4, ganti_at=now()",
-                          extra_args=(sn, vendor))
+                          extra_sql=(", sn_new=$3, sn_new_kanonik=$4, "
+                                     "vendor_new=$5, ganti_at=now()"),
+                          extra_args=(sn, kanonik, vendor))
         await db.set_sesi(uid, "foto_label", no_inet)
         return await update.message.reply_text(
-            f"SN tercatat: <code>{pendek}</code> ({vendor})\n\n"
+            f"SN tercatat: <code>{sn}</code> ({vendor})\n\n"
             "Sekarang kirim <b>foto pertama</b>: stiker SN pada perangkat baru. "
             "Pastikan tulisannya terbaca jelas.",
             parse_mode=ParseMode.HTML)
