@@ -665,7 +665,9 @@ async def pareto_kendala():
     )
 
 
-async def sn_dipakai(sn: str, kecuali: str) -> Optional[str]:
+async def sn_dipakai(kanonik: str, kecuali: str) -> Optional[str]:
+    """Dicek dengan bentuk baku, supaya perangkat yang sama tetap terdeteksi
+    walau ditulis dengan format berbeda."""
     return await pool().fetchval(
-        "SELECT no_inet FROM orders WHERE sn_new=$1 AND no_inet<>$2", sn, kecuali
-    )
+        """SELECT no_inet FROM orders
+           WHERE sn_new_kanonik=$1 AND no_inet<>$2""", kanonik, kecuali)
